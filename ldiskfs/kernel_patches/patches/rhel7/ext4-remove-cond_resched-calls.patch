@@ -1,0 +1,12 @@
+Index: linux-3.10.0-123.9.3.el7.x86_64/fs/ext4/ialloc.c
+===================================================================
+--- linux-3.10.0-123.9.3.el7.x86_64.orig/fs/ext4/ialloc.c
++++ linux-3.10.0-123.9.3.el7.x86_64/fs/ext4/ialloc.c
+@@ -1105,7 +1105,6 @@ unsigned long ext4_count_free_inodes(str
+ 		if (!gdp)
+ 			continue;
+ 		desc_count += ext4_free_inodes_count(sb, gdp);
+-		cond_resched();
+ 	}
+ 	return desc_count;
+ #endif

@@ -1,0 +1,56 @@
+Index: linux-3.10.0-123.el7.x86_64/fs/ext4/ext4.h
+===================================================================
+--- linux-3.10.0-123.el7.x86_64.orig/fs/ext4/ext4.h
++++ linux-3.10.0-123.el7.x86_64/fs/ext4/ext4.h
+@@ -2162,6 +2162,9 @@ extern struct buffer_head * ext4_find_en
+ 					    struct ext4_dir_entry_2 ** res_dir,
+ 					    int *inlined);
+ #define ll_ext4_find_entry(inode, dentry, res_dir) ext4_find_entry(inode, &(dentry)->d_name, res_dir, NULL)
++extern struct buffer_head *ext4_append(handle_t *handle,
++				       struct inode *inode,
++				       ext4_lblk_t *block);
+ extern int ext4_add_dot_dotdot(handle_t *handle, struct inode *dir,
+ 			       struct inode *inode);
+ extern int search_dir(struct buffer_head *bh,
+Index: linux-3.10.0-123.el7.x86_64/fs/ext4/hash.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64.orig/fs/ext4/hash.c
++++ linux-3.10.0-123.el7.x86_64/fs/ext4/hash.c
+@@ -206,3 +206,4 @@ int ext4fs_dirhash(const char *name, int
+ 	hinfo->minor_hash = minor_hash;
+ 	return 0;
+ }
++EXPORT_SYMBOL(ext4fs_dirhash);
+Index: linux-3.10.0-123.el7.x86_64/fs/ext4/namei.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64.orig/fs/ext4/namei.c
++++ linux-3.10.0-123.el7.x86_64/fs/ext4/namei.c
+@@ -48,7 +48,7 @@
+ #define NAMEI_RA_BLOCKS  4
+ #define NAMEI_RA_SIZE	     (NAMEI_RA_CHUNKS * NAMEI_RA_BLOCKS)
+ 
+-static struct buffer_head *ext4_append(handle_t *handle,
++struct buffer_head *ext4_append(handle_t *handle,
+ 					struct inode *inode,
+ 					ext4_lblk_t *block)
+ {
+@@ -163,6 +163,7 @@ static struct buffer_head *__ext4_read_d
+ 	}
+ 	return bh;
+ }
++EXPORT_SYMBOL(ext4_append);
+ 
+ #ifndef assert
+ #define assert(test) J_ASSERT(test)
+Index: linux-3.10.0-123.el7.x86_64/fs/ext4/super.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64.orig/fs/ext4/super.c
++++ linux-3.10.0-123.el7.x86_64/fs/ext4/super.c
+@@ -561,6 +561,7 @@ void __ext4_std_error(struct super_block
+ 	save_error_info(sb, function, line);
+ 	ext4_handle_error(sb);
+ }
++EXPORT_SYMBOL(__ext4_std_error);
+ 
+ /*
+  * ext4_abort is a much stronger failure handler than ext4_error.  The

@@ -1,0 +1,71 @@
+Index: linux-3.10.0-123.el7.x86_64/fs/ext4/xattr.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64.orig/fs/ext4/xattr.c
++++ linux-3.10.0-123.el7.x86_64/fs/ext4/xattr.c
+@@ -945,7 +945,7 @@ ext4_xattr_set_entry(struct ext4_xattr_i
+		if (!i->value) {
+			/* Remove the old name. */
+			size_t size = EXT4_XATTR_LEN(name_len);
+-			last = ENTRY((void *)last - size);
++			last = XA_ENTRY((void *)last - size);
+			memmove(s->here, (void *)s->here + size,
+				(void *)last - (void *)s->here + sizeof(__u32));
+ 			memset(last, 0, size);
+@@ -1086,9 +1086,9 @@ ext4_xattr_block_set(handle_t *handle, s
+ 			if (s->base == NULL)
+ 				goto cleanup;
+ 			memcpy(s->base, BHDR(bs->bh), bs->bh->b_size);
+-			s->first = ENTRY(header(s->base)+1);
++			s->first = XA_ENTRY(header(s->base)+1);
+ 			header(s->base)->h_refcount = cpu_to_le32(1);
+-			s->here = ENTRY(s->base + offset);
++			s->here = XA_ENTRY(s->base + offset);
+ 			s->end = s->base + bs->bh->b_size;
+ 		}
+ 	} else {
+@@ -1101,8 +1101,8 @@ ext4_xattr_block_set(handle_t *handle, s
+ 		header(s->base)->h_magic = cpu_to_le32(EXT4_XATTR_MAGIC);
+ 		header(s->base)->h_blocks = cpu_to_le32(1);
+ 		header(s->base)->h_refcount = cpu_to_le32(1);
+-		s->first = ENTRY(header(s->base)+1);
+-		s->here = ENTRY(header(s->base)+1);
++		s->first = XA_ENTRY(header(s->base)+1);
++		s->here = XA_ENTRY(header(s->base)+1);
+ 		s->end = s->base + sb->s_blocksize;
+ 	}
+ 
+@@ -1887,8 +1887,8 @@ ext4_xattr_cmp(struct ext4_xattr_header
+ {
+ 	struct ext4_xattr_entry *entry1, *entry2;
+ 
+-	entry1 = ENTRY(header1+1);
+-	entry2 = ENTRY(header2+1);
++	entry1 = XA_ENTRY(header1+1);
++	entry2 = XA_ENTRY(header2+1);
+ 	while (!IS_LAST_ENTRY(entry1)) {
+ 		if (IS_LAST_ENTRY(entry2))
+ 			return 1;
+@@ -2014,7 +2014,7 @@ static void ext4_xattr_rehash(struct ext
+ 	__u32 hash = 0;
+ 
+ 	ext4_xattr_hash_entry(header, entry);
+-	here = ENTRY(header+1);
++	here = XA_ENTRY(header+1);
+ 	while (!IS_LAST_ENTRY(here)) {
+ 		if (!here->e_hash) {
+ 			/* Block is not shared if an entry's hash value == 0 */
+Index: linux-3.10.0-123.el7.x86_64/fs/ext4/xattr.h
+===================================================================
+--- linux-3.10.0-123.el7.x86_64.orig/fs/ext4/xattr.h
++++ linux-3.10.0-123.el7.x86_64/fs/ext4/xattr.h
+@@ -77,8 +77,8 @@ struct ext4_xattr_entry {
+ 	((b) - EXT4_XATTR_LEN(3) - sizeof(struct ext4_xattr_header) - 4)
+ 
+ #define BHDR(bh) ((struct ext4_xattr_header *)((bh)->b_data))
+-#define ENTRY(ptr) ((struct ext4_xattr_entry *)(ptr))
+-#define BFIRST(bh) ENTRY(BHDR(bh)+1)
++#define XA_ENTRY(ptr) ((struct ext4_xattr_entry *)(ptr))
++#define BFIRST(bh) XA_ENTRY(BHDR(bh)+1)
+ #define IS_LAST_ENTRY(entry) (*(__u32 *)(entry) == 0)
+ 
+ #define EXT4_ZERO_XATTR_VALUE ((void *)-1)

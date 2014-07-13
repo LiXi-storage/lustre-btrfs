@@ -1,0 +1,28 @@
+Index: linux-3.10.0-123.9.3.el7.x86_64/fs/ext4/xattr.c
+===================================================================
+--- linux-3.10.0-123.9.3.el7.x86_64.orig/fs/ext4/xattr.c
++++ linux-3.10.0-123.9.3.el7.x86_64/fs/ext4/xattr.c
+@@ -1432,7 +1432,8 @@ ext4_xattr_set_handle(handle_t *handle,
+ 	}
+ 	if (!error) {
+ 		ext4_xattr_update_super_block(handle, inode->i_sb);
+-		inode->i_ctime = ext4_current_time(inode);
++		if (!IS_NOCMTIME(inode))
++ 			inode->i_ctime = ext4_current_time(inode);
+ 		if (!value)
+ 			ext4_clear_inode_state(inode, EXT4_STATE_NO_EXPAND);
+ 		error = ext4_mark_iloc_dirty(handle, inode, &is.iloc);
+Index: linux-3.10.0-123.9.3.el7.x86_64/fs/ext4/namei.c
+===================================================================
+--- linux-3.10.0-123.9.3.el7.x86_64.orig/fs/ext4/namei.c
++++ linux-3.10.0-123.9.3.el7.x86_64/fs/ext4/namei.c
+@@ -1813,7 +1813,8 @@ static int add_dirent_to_buf(handle_t *h
+ 	 * happen is that the times are slightly out of date
+ 	 * and/or different from the directory change time.
+ 	 */
+-	dir->i_mtime = dir->i_ctime = ext4_current_time(dir);
++	if (!IS_NOCMTIME(dir))
++		dir->i_mtime = dir->i_ctime = ext4_current_time(dir);
+ 	ext4_update_dx_flag(dir);
+ 	dir->i_version++;
+ 	ext4_mark_inode_dirty(handle, dir);

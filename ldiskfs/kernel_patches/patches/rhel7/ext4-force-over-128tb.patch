@@ -1,0 +1,57 @@
+Index: linux-3.10.0-123.el7.x86_64/fs/ext4/super.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64.orig/fs/ext4/super.c
++++ linux-3.10.0-123.el7.x86_64/fs/ext4/super.c
+@@ -60,6 +60,8 @@ static struct ext4_lazy_init *ext4_li_in
+ static struct mutex ext4_li_mtx;
+ static struct ext4_features *ext4_feat;
+ 
++static int force_over_128tb;
++
+ static int ext4_load_journal(struct super_block *, struct ext4_super_block *,
+ 			     unsigned long journal_devnum);
+ static int ext4_show_options(struct seq_file *seq, struct dentry *root);
+@@ -1156,7 +1158,7 @@ enum {
+ 	Opt_stripe, Opt_delalloc, Opt_nodelalloc, Opt_mblk_io_submit,
+ 	Opt_nomblk_io_submit, Opt_block_validity, Opt_noblock_validity,
+ 	Opt_inode_readahead_blks, Opt_journal_ioprio,
+-	Opt_mballoc,
++	Opt_mballoc, Opt_force_over_128tb,
+ 	Opt_dioread_nolock, Opt_dioread_lock,
+ 	Opt_discard, Opt_nodiscard, Opt_init_itable, Opt_noinit_itable,
+ 	Opt_max_dir_size_kb,
+@@ -1229,6 +1231,7 @@ static const match_table_t tokens = {
+ 	{Opt_noauto_da_alloc, "noauto_da_alloc"},
+ 	{Opt_dioread_nolock, "dioread_nolock"},
+ 	{Opt_dioread_lock, "dioread_lock"},
++	{Opt_force_over_128tb, "force_over_128tb"},
+ 	{Opt_discard, "discard"},
+ 	{Opt_nodiscard, "nodiscard"},
+ 	{Opt_init_itable, "init_itable=%u"},
+@@ -1472,6 +1475,9 @@ static int handle_mount_opt(struct super
+ 		return 1;
+ 	case Opt_mballoc:
+ 		return 1;
++	case Opt_force_over_128tb:
++		force_over_128tb = 1;
++		break;
+ 	}
+ 
+ 	for (m = ext4_mount_opts; m->token != Opt_err; m++)
+@@ -3714,6 +3720,16 @@ static int ext4_fill_super(struct super_
+ 		goto failed_mount;
+ 	}
+ 
++	if (ext4_blocks_count(es) > (8ULL << 32)) {
++		if (force_over_128tb == 0) {
++			printk(KERN_ERR "EXT4-fs does not support filesystems "
++			       "greater than 128TB and can cause data corruption."
++			       "Use \"force_over_128tb\" mount option to override."
++			       "\n");
++			goto failed_mount;
++		}
++	}
++
+ 	if (EXT4_BLOCKS_PER_GROUP(sb) == 0)
+ 		goto cantfind_ext4;
+ 

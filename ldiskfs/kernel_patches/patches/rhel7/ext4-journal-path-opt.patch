@@ -1,0 +1,68 @@
+Index: linux-3.10.0-123.9.3.el7.x86_64/fs/ext4/super.c
+===================================================================
+--- linux-3.10.0-123.9.3.el7.x86_64.orig/fs/ext4/super.c
++++ linux-3.10.0-123.9.3.el7.x86_64/fs/ext4/super.c
+@@ -1152,7 +1152,7 @@ enum {
+ 	Opt_commit, Opt_min_batch_time, Opt_max_batch_time,
+ 	Opt_journal_dev, Opt_journal_checksum, Opt_journal_async_commit,
+ 	Opt_abort, Opt_data_journal, Opt_data_ordered, Opt_data_writeback,
+-	Opt_data_err_abort, Opt_data_err_ignore,
++	Opt_data_err_abort, Opt_data_err_ignore, Opt_journal_path,
+ 	Opt_usrjquota, Opt_grpjquota, Opt_offusrjquota, Opt_offgrpjquota,
+ 	Opt_jqfmt_vfsold, Opt_jqfmt_vfsv0, Opt_jqfmt_vfsv1, Opt_quota,
+ 	Opt_noquota, Opt_barrier, Opt_nobarrier, Opt_err, Opt_dirdata,
+@@ -1197,6 +1197,7 @@ static const match_table_t tokens = {
+ 	{Opt_min_batch_time, "min_batch_time=%u"},
+ 	{Opt_max_batch_time, "max_batch_time=%u"},
+ 	{Opt_journal_dev, "journal_dev=%u"},
++	{Opt_journal_path, "journal_path=%s"},
+ 	{Opt_journal_checksum, "journal_checksum"},
+ 	{Opt_journal_async_commit, "journal_async_commit"},
+ 	{Opt_abort, "abort"},
+@@ -1517,6 +1518,46 @@ static int handle_mount_opt(struct super
+ 		}
+ 		clear_opt(sb, EXTENTS);
+ 		break;
++	case Opt_journal_path: {
++		char *journal_path;
++		struct inode *journal_inode;
++		struct path path;
++		int error;
++
++		if (is_remount) {
++			ext4_msg(sb, KERN_ERR,
++				"Cannot specify journal on remount");
++			return -1;
++		}
++		journal_path = match_strdup(&args[0]);
++		if (!journal_path) {
++			ext4_msg(sb, KERN_ERR, "error: could not dup "
++				"journal device string");
++			return -1;
++		}
++
++		error = kern_path(journal_path, LOOKUP_FOLLOW, &path);
++		if (error) {
++			ext4_msg(sb, KERN_ERR, "error: could not find "
++				"journal device path: error %d", error);
++				kfree(journal_path);
++			return -1;
++		}
++
++		journal_inode = path.dentry->d_inode;
++		if (!S_ISBLK(journal_inode->i_mode)) {
++			ext4_msg(sb, KERN_ERR, "error: journal path %s "
++				"is not a block device", journal_path);
++			path_put(&path);
++			kfree(journal_path);
++			return -1;
++		}
++
++		*journal_devnum = new_encode_dev(journal_inode->i_rdev);
++		path_put(&path);
++		kfree(journal_path);
++		break;
++	}
+ 	}
+ 
+ 	for (m = ext4_mount_opts; m->token != Opt_err; m++)

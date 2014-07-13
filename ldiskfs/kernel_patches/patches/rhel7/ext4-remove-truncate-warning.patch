@@ -1,0 +1,30 @@
+There will cause a deadlock if invoke ext4_truncate with i_mutex locked
+in lustre. Since lustre has own lock to provide protect so we don't
+need this check at all. 
+
+Index: linux-3.10.0-123.el7.x86_64/fs/ext4/inode.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64.orig/fs/ext4/inode.c
++++ linux-3.10.0-123.el7.x86_64/fs/ext4/inode.c
+@@ -3817,8 +3817,6 @@ void ext4_truncate(struct inode *inode)
+ 	 * or it completely new indode. In those cases we might not
+ 	 * have i_mutex locked because it's not necessary.
+ 	 */
+-	if (!(inode->i_state & (I_NEW|I_FREEING)))
+-		WARN_ON(!mutex_is_locked(&inode->i_mutex));
+ 	trace_ext4_truncate_enter(inode);
+ 
+ 	if (!ext4_can_truncate(inode))
+Index: linux-3.10.0-123.el7.x86_64/fs/ext4/page-io.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64.orig/fs/ext4/page-io.c
++++ linux-3.10.0-123.el7.x86_64/fs/ext4/page-io.c
+@@ -187,8 +187,6 @@ void ext4_end_io_work(struct work_struct
+ int ext4_flush_unwritten_io(struct inode *inode)
+ {
+ 	int ret;
+-	WARN_ON_ONCE(!mutex_is_locked(&inode->i_mutex) &&
+-		     !(inode->i_state & I_FREEING));
+ 	ret = ext4_do_flush_completed_IO(inode);
+ 	ext4_unwritten_wait(inode);
+ 	return ret;
