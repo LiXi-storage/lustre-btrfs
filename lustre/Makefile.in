@@ -8,6 +8,7 @@ subdir-m += mgc
 @CLIENT_TRUE@subdir-m += lov osc mdc lmv llite fld
 @LDISKFS_ENABLED_TRUE@subdir-m += osd-ldiskfs
 @ZFS_ENABLED_TRUE@subdir-m += osd-zfs
+@BTRFS_ENABLED_TRUE@subdir-m += osd-btrfs
 @OSDADDON@
 
 @INCLUDE_RULES@

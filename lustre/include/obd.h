@@ -444,6 +444,7 @@ struct niobuf_local {
 #define LUSTRE_SEQ_NAME         "seq"
 
 #define LUSTRE_MDD_NAME         "mdd"
+#define LUSTRE_OSD_BTRFS_NAME	"osd-btrfs"
 #define LUSTRE_OSD_LDISKFS_NAME	"osd-ldiskfs"
 #define LUSTRE_OSD_ZFS_NAME     "osd-zfs"
 #define LUSTRE_VVP_NAME         "vvp"
