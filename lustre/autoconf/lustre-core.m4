@@ -2020,6 +2020,8 @@ lustre/osc/Makefile
 lustre/osc/autoMakefile
 lustre/ost/Makefile
 lustre/ost/autoMakefile
+lustre/osd-btrfs/Makefile
+lustre/osd-btrfs/autoMakefile
 lustre/osd-ldiskfs/Makefile
 lustre/osd-ldiskfs/autoMakefile
 lustre/osd-zfs/Makefile

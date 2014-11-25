@@ -25,10 +25,10 @@
 #
 
 #
-# Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
 # Use is subject to license terms.
 #
-# Copyright (c) 2011, 2014, Intel Corporation.
+# Copyright (c) 2012, Intel Corporation.
 #
 
 #
@@ -36,40 +36,11 @@
 # Lustre is a trademark of Sun Microsystems, Inc.
 #
 
-AUTOMAKE_OPTIONS = foreign
-
-# also update lustre/autoconf/lustre-core.m4 AC_CONFIG_FILES
-ALWAYS_SUBDIRS = include obdclass ldlm ptlrpc obdecho \
-	mgc fid fld doc utils tests scripts autoconf contrib conf
-
-SERVER_SUBDIRS = ost mgs mdt mdd ofd osd-zfs osd-ldiskfs \
-	quota osp lod target lfsck osd-btrfs
-
-CLIENT_SUBDIRS = mdc lmv llite lov osc
-
-SUBDIRS := $(ALWAYS_SUBDIRS)
-
-if SERVER
-SUBDIRS += $(SERVER_SUBDIRS)
+if MODULES
+if BTRFS_ENABLED
+modulefs_DATA = osd_btrfs$(KMODEXT)
+endif
 endif
 
-if CLIENT
-SUBDIRS += $(CLIENT_SUBDIRS)
-endif
-
-DIST_SUBDIRS := $(ALWAYS_SUBDIRS) $(SERVER_SUBDIRS) $(CLIENT_SUBDIRS)
-
-EXTRA_DIST = BUGS kernel_patches BUILDING
-
-sources: lustre_build_version
-
-all-recursive: lustre_build_version
-
-BUILD_VER_H=$(top_builddir)/lustre/include/lustre/lustre_build_version.h
-
-lustre_build_version:
-	perl $(top_builddir)/lustre/scripts/version_tag.pl $(top_srcdir) $(top_builddir) > tmpver
-	echo "#define LUSTRE_RELEASE @RELEASE@" >> tmpver
-	cmp -s $(BUILD_VER_H) tmpver > tmpdiff 2> /dev/null &&		\
-                $(RM) tmpver tmpdiff ||					\
-		mv -f tmpver $(BUILD_VER_H)
+MOSTLYCLEANFILES := @MOSTLYCLEANFILES@
+EXTRA_DIST := $(osd_btrfs-objs:%.o=%.c) osd_internal.h

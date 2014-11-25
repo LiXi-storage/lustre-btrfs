@@ -1,0 +1,6 @@
+MODULES := osd_btrfs
+osd_btrfs-objs = osd_handler.o
+
+EXTRA_PRE_CFLAGS := -I@LINUX@/fs -I@abs_top_builddir@
+
+@INCLUDE_RULES@

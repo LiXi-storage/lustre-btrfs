@@ -475,12 +475,13 @@ AC_ARG_ENABLE([server],
 # call it here.
 LB_CONFIG_MODULES
 AS_IF([test x$enable_modules = xno], [enable_server=no])
+LB_CONFIG_BTRFS
 LB_CONFIG_LDISKFS
 LB_CONFIG_ZFS
 
 # If no backends were configured, and the user did not explicitly
 # require servers to be enabled, we just disable servers.
-AS_IF([test x$enable_ldiskfs = xno -a x$enable_zfs = xno], [
+AS_IF([test x$enable_btrfs = xno -a x$enable_ldiskfs = xno -a x$enable_zfs = xno], [
 	AS_CASE([$enable_server],
 		[maybe], [enable_server=no],
 		[yes], [AC_MSG_ERROR([cannot enable servers, no backends were configured])])
@@ -518,6 +519,7 @@ for arg; do
 		--with-release=* ) ;;
 		--with-kmp-moddir=* ) ;;
 		--with-linux=* | --with-linux-obj=* ) ;;
+		--enable-btrfs | --disable-btrfs ) ;;
 		--enable-ldiskfs | --disable-ldiskfs ) ;;
 		--enable-modules | --disable-modules ) ;;
 		--enable-server | --disable-server ) ;;
@@ -572,6 +574,9 @@ if test x$enable_server != xyes ; then
 	if test -n "$CROSS_SUFFIX" ; then
 		RPMBINARGS="$RPMBINARGS --define \"lustre_name lustre-client$CROSS_SUFFIX\""
 	fi
+fi
+if test x$enable_btrfs = xyes ; then
+	RPMBINARGS="$RPMBINARGS --with btrfs"
 fi
 if test x$enable_ldiskfs != xyes ; then
 	RPMBINARGS="$RPMBINARGS --without ldiskfs"

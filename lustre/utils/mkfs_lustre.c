@@ -96,11 +96,23 @@ static int print_only = 0;
  #define FSLIST_ZFS ""
 #endif /* HAVE_ZFS_OSD */
 
+
+#ifdef HAVE_BTRFS_OSD
+ #ifdef HAVE_FSLIST
+   #define FSLIST_BTRFS "|btrfs"
+ #else
+  #define FSLIST_BTRFS "btrfs"
+  #define HAVE_FSLIST
+ #endif
+#else
+ #define FSLIST_BTRFS ""
+#endif /* HAVE_BTRFS_OSD */
+
 #ifndef HAVE_FSLIST
  #error "no backing OSD types (ldiskfs or ZFS) are configured"
 #endif
 
-#define FSLIST FSLIST_LDISKFS FSLIST_ZFS
+#define FSLIST FSLIST_LDISKFS FSLIST_ZFS FSLIST_BTRFS
 
 void usage(FILE *out)
 {
