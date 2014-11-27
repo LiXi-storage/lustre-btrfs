@@ -152,7 +152,7 @@ mount_lustre_DEPENDENCIES := $(LIBPTLCTL)
 mkfs_lustre_SOURCES = mkfs_lustre.c mount_utils.c mount_utils.h
 mkfs_lustre_CPPFLAGS := -UTUNEFS ${MNTMODCFLAGS}
 mkfs_lustre_LDFLAGS  := ${MNTMODLDFLAGS}
-mkfs_lustre_LDADD    := $(LIBPTLCTL)
+mkfs_lustre_LDADD    := $(LIBPTLCTL) -lselinux
 mkfs_lustre_DEPENDENCIES := $(LIBPTLCTL)
 
 tunefs_lustre_SOURCES = mkfs_lustre.c mount_utils.c mount_utils.h
