@@ -81,42 +81,105 @@
 
 int btrfs_read_ldd(char *dev, struct lustre_disk_data *mo_ldd)
 {
-	fprintf(stderr, "%s: btrfs read ldd is not supported\n",
-		progname);
-	return -1;
+	return filesystem_read_ldd(dev, mo_ldd,
+				   "/usr/sbin/btrfs filesystem label");
 }
 
 /* Write the server config files */
 int btrfs_write_ldd(struct mkfs_opts *mop)
 {
-	fprintf(stderr, "%s: btrfs write ldd is not supported\n",
-		progname);
-	return -1;
+	return filesystem_write_ldd(mop);
 }
 
 /* Check whether the device has already been used with lustre */
 int btrfs_is_lustre(char *dev, unsigned *mount_type)
 {
-	fprintf(stderr, "%s: btrfs is_lustre is not supported\n",
-		progname);
+	int ret;
+	struct lustre_disk_data	mo_ldd;
+
+	mo_ldd.ldd_mount_type = LDD_MT_BTRFS;
+	mo_ldd.ldd_mount_opts[0] = '\0';
+	ret = filesystem_have_file(MOUNT_DATA_FILE, dev, &mo_ldd);
+	if (ret) {
+		/* in the -1 case, 'extents' means IS a lustre target */
+		*mount_type = LDD_MT_BTRFS;
+		return 1;
+	}
+
+	ret = filesystem_have_file(LAST_RCVD, dev, &mo_ldd);
+	if (ret) {
+		*mount_type = LDD_MT_BTRFS;
+		return 1;
+	}
+
 	return 0;
 }
+
+#define MKFS_BTRFS "mkfs.btrfs"
 
 /* Build fs according to type */
 int btrfs_make_lustre(struct mkfs_opts *mop)
 {
-	fprintf(stderr, "%s: btrfs make_lustre is not supported\n",
-		progname);
-	return -1;
+	__u64 device_kb = mop->mo_device_kb;
+	char mkfs_cmd[PATH_MAX];
+	char *dev;
+	int ret;
+
+	if (!(mop->mo_flags & MO_IS_LOOP)) {
+		mop->mo_device_kb = get_device_size(mop->mo_device);
+
+		if (mop->mo_device_kb == 0)
+			return ENODEV;
+
+		/* Compare to real size */
+		if (device_kb == 0 || device_kb > mop->mo_device_kb)
+			device_kb = mop->mo_device_kb;
+		else
+			mop->mo_device_kb = device_kb;
+	}
+
+	/* For loop device format the dev, not the filename */
+	dev = mop->mo_device;
+	if (mop->mo_flags & MO_IS_LOOP)
+		dev = mop->mo_loopdev;
+
+	/* Allow reformat of an existing filesystem. */
+	strscat(mop->mo_mkfsopts, " -f", sizeof(mop->mo_mkfsopts));
+
+	vprint("formatting backing filesystem %s on %s\n",
+	       MT_STR(&mop->mo_ldd), dev);
+	vprint("\ttarget name  %s\n", mop->mo_ldd.ldd_svname);
+	vprint("\toptions       %s\n", mop->mo_mkfsopts);
+
+	snprintf(mkfs_cmd, sizeof(mkfs_cmd),
+		 "%s -L %s ", MKFS_BTRFS, mop->mo_ldd.ldd_svname);
+	strscat(mkfs_cmd, mop->mo_mkfsopts, sizeof(mkfs_cmd));
+	strscat(mkfs_cmd, " ", sizeof(mkfs_cmd));
+	strscat(mkfs_cmd, dev, sizeof(mkfs_cmd));
+
+	vprint("mkfs_cmd = %s\n", mkfs_cmd);
+	ret = run_command(mkfs_cmd, sizeof(mkfs_cmd));
+	if (ret) {
+		fatal();
+		fprintf(stderr, "Unable to build fs %s (%d)\n", dev, ret);
+	}
+	return ret;
 }
 
 int btrfs_prepare_lustre(struct mkfs_opts *mop,
 			 char *default_mountopts, int default_len,
 			 char *always_mountopts, int always_len)
 {
-	fprintf(stderr, "%s: btrfs prepare_lustre is not supported\n",
-		progname);
-	return -1;
+	int ret;
+
+	/* Set MO_IS_LOOP to indicate a loopback device is needed */
+	ret = is_block(mop->mo_device);
+	if (ret < 0)
+		return errno;
+	else if (ret == 0)
+		mop->mo_flags |= MO_IS_LOOP;
+
+	return 0;
 }
 
 int btrfs_tune_lustre(char *dev, struct mount_opts *mop)

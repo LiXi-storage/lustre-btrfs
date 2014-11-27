@@ -218,7 +218,9 @@ void set_defaults(struct mkfs_opts *mop)
 	mop->mo_ldd.ldd_magic = LDD_MAGIC;
 	mop->mo_ldd.ldd_config_ver = 1;
 	mop->mo_ldd.ldd_flags = LDD_F_NEED_INDEX | LDD_F_UPDATE | LDD_F_VIRGIN;
-#ifdef HAVE_LDISKFS_OSD
+#ifdef HAVE_BTRFS_OSD
+	mop->mo_ldd.ldd_mount_type = LDD_MT_BTRFS;
+#elif defined HAVE_LDISKFS_OSD
 	mop->mo_ldd.ldd_mount_type = LDD_MT_LDISKFS;
 #else
 	mop->mo_ldd.ldd_mount_type = LDD_MT_ZFS;
