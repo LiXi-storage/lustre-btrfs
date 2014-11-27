@@ -162,5 +162,11 @@ struct module_backfs_ops {
 
 struct module_backfs_ops *load_backfs_module(enum ldd_mount_type mount_type);
 void unload_backfs_ops(struct module_backfs_ops *ops);
-
+int is_block(char *devname);
+int filesystem_write_ldd(struct mkfs_opts *mop);
+int filesystem_read_ldd(char *dev, struct lustre_disk_data *mo_ldd,
+			const char *label_command);
+int filesystem_is_lustre(char *dev, unsigned *mount_type);
+int filesystem_have_file(char *file_name, char *dev,
+			 struct lustre_disk_data *mo_ldd);
 #endif

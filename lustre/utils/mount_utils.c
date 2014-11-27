@@ -809,3 +809,335 @@ int file_create(char *path, __u64 size)
 
 	return 0;
 }
+
+/* return canonicalized absolute pathname, even if the target file does not
+ * exist, unlike realpath */
+static char *absolute_path(char *devname)
+{
+	char  buf[PATH_MAX + 1] = "";
+	char *path;
+	char *ptr;
+	int len;
+
+	path = malloc(sizeof(buf));
+	if (path == NULL)
+		return NULL;
+
+	if (devname[0] != '/') {
+		if (getcwd(buf, sizeof(buf) - 1) == NULL) {
+			free(path);
+			return NULL;
+		}
+		len = snprintf(path, sizeof(buf), "%s/%s", buf, devname);
+		if (len >= sizeof(buf)) {
+			free(path);
+			return NULL;
+		}
+	} else {
+		len = snprintf(path, sizeof(buf), "%s", devname);
+		if (len >= sizeof(buf)) {
+			free(path);
+			return NULL;
+		}
+	}
+
+	/* truncate filename before calling realpath */
+	ptr = strrchr(path, '/');
+	if (ptr == NULL) {
+		free(path);
+		return NULL;
+	}
+	*ptr = '\0';
+	if (buf != realpath(path, buf)) {
+		free(path);
+		return NULL;
+	}
+	/* add the filename back */
+	len = snprintf(path, PATH_MAX, "%s/%s", buf, ptr+1);
+	if (len >= PATH_MAX) {
+		free(path);
+		return NULL;
+	}
+	return path;
+}
+
+/* Determine if a device is a block device (as opposed to a file) */
+int is_block(char *devname)
+{
+	struct stat st;
+	int	ret = 0;
+	char	*devpath;
+
+	devpath = absolute_path(devname);
+	if (devpath == NULL) {
+		fprintf(stderr, "%s: failed to resolve path to %s\n",
+			progname, devname);
+		return -1;
+	}
+
+	ret = access(devname, F_OK);
+	if (ret != 0) {
+		if (strncmp(devpath, "/dev/", 5) == 0) {
+			/* nobody sane wants to create a loopback file under
+			 * /dev. Let's just report the device doesn't exist */
+			fprintf(stderr, "%s: %s apparently does not exist\n",
+				progname, devpath);
+			ret = -1;
+			goto out;
+		}
+		ret = 0;
+		goto out;
+	}
+	ret = stat(devpath, &st);
+	if (ret != 0) {
+		fprintf(stderr, "%s: cannot stat %s\n", progname, devpath);
+		goto out;
+	}
+	ret = S_ISBLK(st.st_mode);
+out:
+	free(devpath);
+	return ret;
+}
+
+/*
+ * Concatenate context of the temporary mount point iff selinux is enabled
+ */
+#ifdef HAVE_SELINUX
+static void append_context_for_mount(char *mntpt,
+				     struct lustre_disk_data *mo_ldd)
+{
+	security_context_t fcontext;
+
+	if (getfilecon(mntpt, &fcontext) < 0) {
+		/* Continuing with default behaviour */
+		fprintf(stderr, "%s: Get file context failed : %s\n",
+			progname, strerror(errno));
+		return;
+	}
+
+	if (fcontext != NULL) {
+		strncat(mo_ldd->ldd_mount_opts,
+			sizeof(mo_ldd->ldd_mount_opts), ",context=");
+		strncat(mo_ldd->ldd_mount_opts,
+			sizeof(mo_ldd->ldd_mount_opts), fcontext);
+		freecon(fcontext);
+	}
+}
+#endif
+
+/* Write the server config files */
+int filesystem_write_ldd(struct mkfs_opts *mop)
+{
+	char mntpt[] = "/tmp/mntXXXXXX";
+	char filepnm[128];
+	char *dev;
+	FILE *filep;
+	int ret = 0;
+	size_t num;
+
+	/* Mount this device temporarily in order to write these files */
+	if (!mkdtemp(mntpt)) {
+		fprintf(stderr, "%s: Can't create temp mount point %s: %s\n",
+			progname, mntpt, strerror(errno));
+		return errno;
+	}
+
+	/*
+	 * Append file context to mount options if SE Linux is enabled
+	 */
+	#ifdef HAVE_SELINUX
+	if (is_selinux_enabled() > 0)
+		append_context_for_mount(mntpt, &mop->mo_ldd);
+	#endif
+
+	dev = mop->mo_device;
+	if (mop->mo_flags & MO_IS_LOOP)
+		dev = mop->mo_loopdev;
+
+	ret = mount(dev, mntpt, MT_STR(&mop->mo_ldd), 0,
+		    mop->mo_ldd.ldd_mount_opts);
+	if (ret) {
+		fprintf(stderr, "%s: Unable to mount %s: %s\n",
+			progname, dev, strerror(errno));
+		ret = errno;
+		if (errno == ENODEV) {
+			fprintf(stderr, "Is the %s module available?\n",
+				MT_STR(&mop->mo_ldd));
+		}
+		goto out_rmdir;
+	}
+
+	/* Set up initial directories */
+	snprintf(filepnm, sizeof(filepnm), "%s/%s", mntpt, MOUNT_CONFIGS_DIR);
+	ret = mkdir(filepnm, 0777);
+	if ((ret != 0) && (errno != EEXIST)) {
+		fprintf(stderr, "%s: Can't make configs dir %s (%s)\n",
+			progname, filepnm, strerror(errno));
+		goto out_umnt;
+	} else if (errno == EEXIST) {
+		ret = 0;
+	}
+
+	/* Save the persistent mount data into a file. Lustre must pre-read
+	   this file to get the real mount options. */
+	vprint("Writing %s\n", MOUNT_DATA_FILE);
+	snprintf(filepnm, sizeof(filepnm), "%s/%s", mntpt, MOUNT_DATA_FILE);
+	filep = fopen(filepnm, "w");
+	if (!filep) {
+		fprintf(stderr, "%s: Unable to create %s file: %s\n",
+			progname, filepnm, strerror(errno));
+		goto out_umnt;
+	}
+	num = fwrite(&mop->mo_ldd, sizeof(mop->mo_ldd), 1, filep);
+	if (num < 1 && ferror(filep)) {
+		fprintf(stderr, "%s: Unable to write to file (%s): %s\n",
+			progname, filepnm, strerror(errno));
+		fclose(filep);
+		goto out_umnt;
+	}
+	fclose(filep);
+
+out_umnt:
+	umount(mntpt);
+out_rmdir:
+	rmdir(mntpt);
+	return ret;
+}
+
+static int readcmd(char *cmd, char *buf, int len)
+{
+	FILE *fp;
+	int red;
+
+	fp = popen(cmd, "r");
+	if (!fp)
+		return errno;
+
+	red = fread(buf, 1, len, fp);
+	pclose(fp);
+
+	/* strip trailing newline */
+	if (buf[red - 1] == '\n')
+		buf[red - 1] = '\0';
+
+	return (red == 0) ? -ENOENT : 0;
+}
+
+int filesystem_read_ldd(char *dev, struct lustre_disk_data *mo_ldd,
+			const char *label_command)
+{
+	char mntpt[] = "/tmp/mntXXXXXX";
+	char filepnm[128];
+	FILE *filep;
+	int ret = 0;
+	char cmd[PATH_MAX];
+
+	/* Mount this device temporarily in order to write these files */
+	if (!mkdtemp(mntpt)) {
+		fprintf(stderr, "%s: Can't create temp mount point %s: %s\n",
+			progname, mntpt, strerror(errno));
+		return errno;
+	}
+
+	/*
+	 * Append file context to mount options if SE Linux is enabled
+	 */
+	#ifdef HAVE_SELINUX
+	if (is_selinux_enabled() > 0)
+		append_context_for_mount(mntpt, mo_ldd);
+	#endif
+
+	ret = mount(dev, mntpt, MT_STR(mo_ldd), 0,
+		    mo_ldd->ldd_mount_opts);
+	if (ret) {
+		fprintf(stderr, "%s: Unable to mount %s: %s\n",
+			progname, dev, strerror(errno));
+		ret = errno;
+		if (errno == ENODEV) {
+			fprintf(stderr, "Is the %s module available?\n",
+				MT_STR(mo_ldd));
+		}
+		goto out_rmdir;
+	}
+
+	snprintf(filepnm, sizeof(filepnm), "%s/"MOUNT_DATA_FILE, mntpt);
+	filep = fopen(filepnm, "r");
+	if (filep) {
+		size_t num_read;
+		vprint("Reading %s\n", MOUNT_DATA_FILE);
+		num_read = fread(mo_ldd, sizeof(*mo_ldd), 1, filep);
+		if (num_read < 1 && ferror(filep)) {
+			fprintf(stderr, "%s: Unable to read from file %s: %s\n",
+				progname, filepnm, strerror(errno));
+		}
+		fclose(filep);
+	}
+	/*
+	 * Getting label might need to mount file system.
+	 * Umount it in advance.
+	 */
+	umount(mntpt);
+
+	/* As long as we at least have the label, we're good to go */
+	snprintf(cmd, sizeof(cmd), "%s %s", label_command, dev);
+	ret = readcmd(cmd, mo_ldd->ldd_svname, sizeof(mo_ldd->ldd_svname) - 1);
+	if (ret) {
+		fprintf(stderr, "%s: Unable to get label from command '%s'\n",
+			progname, cmd);
+	}
+
+out_rmdir:
+	rmdir(mntpt);
+	return ret;
+}
+
+/* Check whether the file exists in the device */
+int filesystem_have_file(char *file_name, char *dev,
+			 struct lustre_disk_data *mo_ldd)
+{
+	char mntpt[] = "/tmp/mntXXXXXX";
+	char filepnm[128];
+	int ret = 0;
+	struct stat stat_buf;
+
+	/* Mount this device temporarily in order to write these files */
+	if (!mkdtemp(mntpt)) {
+		fprintf(stderr, "%s: Can't create temp mount point %s: %s\n",
+			progname, mntpt, strerror(errno));
+		return errno;
+	}
+
+	/*
+	 * Append file context to mount options if SE Linux is enabled
+	 */
+	#ifdef HAVE_SELINUX
+	if (is_selinux_enabled() > 0)
+		append_context_for_mount(mntpt, mo_ldd);
+	#endif
+
+	ret = mount(dev, mntpt, MT_STR(mo_ldd), 0,
+		    mo_ldd->ldd_mount_opts);
+	if (ret) {
+		fprintf(stderr, "%s: Unable to mount %s: %s\n",
+			progname, dev, strerror(errno));
+		ret = errno;
+		if (errno == ENODEV) {
+			fprintf(stderr, "Is the %s module available?\n",
+				MT_STR(mo_ldd));
+		}
+		goto out_rmdir;
+	}
+
+	/* Set up initial directories */
+	snprintf(filepnm, sizeof(filepnm), "%s/%s", mntpt, file_name);
+	ret = stat(filepnm, &stat_buf);
+	if (ret)
+		ret = 0;
+	else
+		ret = 1;
+
+	umount(mntpt);
+out_rmdir:
+	rmdir(mntpt);
+	return ret;
+}
