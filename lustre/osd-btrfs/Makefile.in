@@ -1,5 +1,5 @@
 MODULES := osd_btrfs
-osd_btrfs-objs = osd_handler.o
+osd_btrfs-objs = osd_handler.o osd_lproc.o
 
 EXTRA_PRE_CFLAGS := -I@LINUX@/fs -I@abs_top_builddir@
 
