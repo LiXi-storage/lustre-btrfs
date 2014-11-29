@@ -1,0 +1,3 @@
+This directory contains the patches needed to be applied to btrfs to
+support Lustre. They are applied automatically during the btrfs build
+process and could also be applied to the core kernel directly.

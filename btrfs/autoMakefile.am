@@ -1,0 +1,132 @@
+EXTRA_DIST = kernel_patches
+
+if MODULES
+if BTRFS_ENABLED
+all-local: sources
+
+modulefs_DATA = btreefs$(KMODEXT)
+
+btreefs$(KMODEXT): sources
+endif
+endif
+
+btreefs_linux_headers := $(addprefix linux/,$(subst btrfs,btreefs,$(notdir $(linux_headers))))
+btreefs_linux_uapi_headers := $(addprefix uapi/linux/,$(subst btrfs,btreefs,$(notdir $(linux_uapi_headers))))
+
+$(filter %.c,$(btreefs_patched_sources)): sources $(btreefs_linux_headers) $(filter %.h,$(btreefs_patched_sources)) $(btreefs_linux_uapi_headers)
+
+btreefs_sed_flags = \
+	-e "s/dx_hash_info/btrfs_dx_hash_info/g" \
+	-e "s/DX_HASH/btrfs_DX_HASH/g" \
+	-e "s/BTRFS/BTREEFS/g" -e "s/btrfs/btreefs/g" \
+	-e "s/BTREEFS_MINOR/BTRFS_MINOR/g" \
+	-e "s/BTREEFS_SUPER_MAGIC/BTRFS_SUPER_MAGIC/g" \
+	-e "s/FILEID_BTREEFS_WITH/FILEID_BTRFS_WITH/g"
+
+%.c: linux-stage/fs/btrfs/%.c
+	sed $(strip $(btreefs_sed_flags)) $< > $@
+
+%.h: linux-stage/fs/btrfs/%.h
+	sed $(strip $(btreefs_sed_flags)) $< > $@
+
+linux/btreefs%.h: linux-stage/include/linux/btrfs%.h
+	sed $(strip $(btreefs_sed_flags)) $< > $@
+
+series := @top_srcdir@/btrfs/kernel_patches/series/btrfs-$(BTRFS_SERIES)
+patches := @top_srcdir@/btrfs/kernel_patches/patches
+
+sources: $(backfs_sources) $(backfs_headers) $(linux_headers) $(series) $(trace_headers) $(linux_uapi_headers)
+	rm -rf linux-stage linux sources trace $(btreefs_SOURCES) tests
+	mkdir -p linux-stage/fs/btrfs linux-stage/include/linux \
+		 linux-stage/include/trace/events \
+		 linux-stage/fs/btrfs/tests \
+		 linux-stage/include/uapi/linux
+	cp $(backfs_sources) $(backfs_headers) $(backfs_extra) linux-stage/fs/btrfs
+	cp $(tests_headers) $(tests_sources) linux-stage/fs/btrfs/tests
+	if test -n "$(linux_headers)" ; then \
+		cp $(linux_headers) linux-stage/include/linux; \
+	fi
+	if test -n "$(trace_headers)" ; then \
+		cp $(trace_headers) linux-stage/include/trace/events; \
+	fi
+	if test -n "$(linux_uapi_headers)" ; then \
+		cp $(linux_uapi_headers) linux-stage/include/uapi/linux; \
+	fi
+if USE_QUILT
+	ln -s ../$(patches) linux-stage/patches
+	ln -s ../$(series) linux-stage/series
+	cd linux-stage && quilt push -a -q
+else
+	@echo -n "Applying btrfs patches:"
+	@cd linux-stage && for i in $$(<../$(series)) ; do \
+		echo -n " $$i" ; \
+		patch -s -p1 < ../$(patches)/$$i || exit 1 ; \
+	done
+	@echo
+endif
+	mkdir -p linux trace/events tests uapi/linux
+	@echo -n "Replacing 'btrfs' with 'btreefs':"
+	for i in $(notdir $(backfs_headers) $(backfs_sources)) $(new_sources) ; do \
+		echo -n " $$i" ; \
+		sed $(strip $(btreefs_sed_flags)) \
+			linux-stage/fs/btrfs/$$i > $$i ; \
+	done
+	for i in $(subst btrfs,,$(notdir $(backfs_headers))) ; do \
+		if test -f "btrfs$$i" ; then \
+			echo -n " btrfs$$i" ; \
+			mv btrfs$$i btreefs$$i ; \
+		fi ; \
+	done
+	for i in $(subst btrfs,,$(notdir $(linux_headers) $(new_headers))) ; do \
+		echo -n " btrfs$$i" ; \
+		sed $(strip $(btreefs_sed_flags)) \
+			linux-stage/include/linux/btrfs$$i \
+			> linux/btreefs$$i ; \
+	done
+	for i in $(subst btrfs,,$(notdir $(trace_headers))) ; do \
+		echo -n " btrfs$$i"; \
+		sed $(strip $(btreefs_sed_flags)) \
+			linux-stage/include/trace/events/btrfs$$i \
+			> trace/events/btreefs$$i ; \
+	done
+	for i in $(notdir $(linux_new_headers)) ; do \
+		echo -n " $$i"; \
+		sed $(strip $(btreefs_sed_flags)) \
+                linux-stage/include/linux/$$i \
+                > linux/$$i ; \
+	done
+	for i in $(notdir $(tests_sources) $(tests_headers)) ; do \
+		echo -n " $$i"; \
+		sed $(strip $(btreefs_sed_flags)) \
+                linux-stage/fs/btrfs/tests/$$i \
+                > tests/$$i ; \
+	done
+	for i in $(subst btrfs,,$(notdir $(tests_sources) $(tests_headers))) ; do \
+		if test -f "tests/btrfs$$i" ; then \
+			echo -n " btrfs$$i" ; \
+			mv tests/btrfs$$i tests/btreefs$$i ; \
+		fi ; \
+	done
+	for i in $(subst btrfs,,$(notdir $(linux_uapi_headers))) ; do \
+		echo -n " btrfs$$i" ; \
+		sed $(strip $(btreefs_sed_flags)) \
+			linux-stage/include/uapi/linux/btrfs$$i \
+			> uapi/linux/btreefs$$i ; \
+	done
+
+	@echo
+	touch sources
+
+foo-check:
+	@echo "btreefs_sources: $(btreefs_sources)"
+	@echo "btreefs_SOURCES: $(btreefs_SOURCES)"
+	@echo "btreefs_headers: $(btreefs_headers)"
+	@echo "btreefs_objects: $(btreefs_objects)"
+	@echo "btreefs_OBJECTS: $(btreefs_OBJECTS)"
+	@echo "btreefs_LDADD: $(btreefs_LDADD)"
+
+MOSTLYCLEANFILES := @MOSTLYCLEANFILES@
+CLEANFILES = sources $(notdir $(linux_new_headers) $(linux_headers) $(backfs_headers) $(backfs_sources) $(new_sources) $(new_headers) $(trace_headers) $(tests_headers) $(tests_sources) $(linux_uapi_headers))
+
+clean-local:
+	rm -rf linux linux-stage btreefs*.h trace modules.order tests uapi

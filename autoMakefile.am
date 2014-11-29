@@ -4,7 +4,8 @@ SUBDIRS := @LDISKFS_SUBDIR@ \
 	@LUSTREIOKIT_SUBDIR@ \
 	@LIBCFS_SUBDIR@ \
 	lnet \
-	lustre
+	lustre \
+	@BTRFS_SUBDIR@
 
 DIST_SUBDIRS := ldiskfs \
 	@SNMP_DIST_SUBDIR@ \
@@ -12,7 +13,8 @@ DIST_SUBDIRS := ldiskfs \
 	@LIBCFS_SUBDIR@ \
 	lnet \
 	lustre \
-	config contrib
+	config contrib \
+	btrfs
 
 AUTOMAKE_OPTIONS = foreign
 
@@ -61,7 +63,7 @@ doxygen-%: build/doxyfile.%
 	doxygen $<
 
 if MODULES
-.PHONY: ldiskfs-sources lustre-sources
+.PHONY: ldiskfs-sources lustre-sources btrfs-sources
 
 ldiskfs-sources:
 if LDISKFS_ENABLED
@@ -71,10 +73,15 @@ endif
 lustre-sources:
 	$(MAKE) sources -C lustre || exit $$?
 
+btrfs-sources:
+if BTRFS_ENABLED
+	$(MAKE) sources -C @BTRFS_SUBDIR@ || exit $$?
+endif
+
 if LINUX
 all-am: modules
 
-modules: ldiskfs-sources lustre-sources module-symvers
+modules: ldiskfs-sources lustre-sources btrfs-sources module-symvers
 	$(MAKE) CC="$(CC)" $(CROSS_VARS) -C $(LINUX_OBJ)	     \
 	-f $(PWD)/build/Makefile LUSTRE_LINUX_CONFIG=$(LINUX_CONFIG) \
 	LINUXINCLUDE='-I$$(srctree)/arch/$$(SRCARCH)/include -Iarch/$$(SRCARCH)/include/generated -Iinclude $$(if $$(KBUILD_SRC),-Iinclude2 -I$$(srctree)/include) -I$$(srctree)/arch/$$(SRCARCH)/include/uapi -Iarch/$$(SRCARCH)/include/generated/uapi -I$$(srctree)/include/uapi -Iinclude/generated/uapi -include $(CONFIG_INCLUDE)' \
