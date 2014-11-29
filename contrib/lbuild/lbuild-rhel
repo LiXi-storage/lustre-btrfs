@@ -23,7 +23,8 @@ patch_spec_common() {
 
     sed -i -e '/find $RPM_BUILD_ROOT\/lib\/modules\/$KernelVer/a\
     cp -a fs/ext3/* $RPM_BUILD_ROOT/lib/modules/$KernelVer/build/fs/ext3 \
-    cp -a fs/ext4/* $RPM_BUILD_ROOT/lib/modules/$KernelVer/build/fs/ext4' \
+    cp -a fs/ext4/* $RPM_BUILD_ROOT/lib/modules/$KernelVer/build/fs/ext4 \
+    cp -a fs/btrfs/* $RPM_BUILD_ROOT/lib/modules/$KernelVer/build/fs/btrfs' \
           SPECS/$SPEC_NAME 2>&1 || \
         fatal 1 "Error while editing SPECS/$SPEC_NAME"
 

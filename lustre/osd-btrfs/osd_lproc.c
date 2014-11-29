@@ -43,8 +43,8 @@
 
 #include "osd_internal.h"
 
-#ifdef LPROCFS
-struct lprocfs_seq_vars lprocfs_osd_obd_vars[] = {
+#ifdef CONFIG_PROC_FS
+struct lprocfs_vars lprocfs_osd_obd_vars[] = {
 };
 
 int osd_procfs_init(struct osd_device *osd, const char *name)
@@ -64,7 +64,7 @@ int osd_procfs_init(struct osd_device *osd, const char *name)
 	LASSERT(type != NULL);
 
 	/* Find the type procroot and add the proc entry for this device */
-	osd->od_proc_entry = lprocfs_seq_register(name, type->typ_procroot,
+	osd->od_proc_entry = lprocfs_register(name, type->typ_procroot,
 						  lprocfs_osd_obd_vars,
 						  &osd->od_dt_dev);
 	if (IS_ERR(osd->od_proc_entry)) {
