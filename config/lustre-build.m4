@@ -232,6 +232,7 @@ AS_IF([test "x$enable_modules" = xyes], [
 			LIBCFS_PROG_LINUX
 			LN_PROG_LINUX
 			AS_IF([test "x$enable_server" != xno], [LB_EXT4_SRC_DIR])
+			AS_IF([test "x$enable_server" != xno], [LB_BTRFS_SRC_DIR])
 			LC_PROG_LINUX
 		], [*], [
 			# This is strange - Lustre supports a target we don't
@@ -449,6 +450,8 @@ AC_DEFUN([LB_CONFIG_FILES], [
 		[Rules:build/Rules.in]
 		AC_PACKAGE_TARNAME[.spec]
 		AC_PACKAGE_TARNAME[-dkms.spec]
+		btrfs/Makefile
+		btrfs/autoMakefile
 		contrib/Makefile
 		contrib/lbuild/Makefile
 		contrib/scripts/Makefile

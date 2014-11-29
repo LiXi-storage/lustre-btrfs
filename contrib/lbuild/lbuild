@@ -67,6 +67,7 @@ USE_BUILD_CACHE=true
 # what does this do exactly?  does it imply no kernel build?
 NORPM=false
 IOKITRPM=true
+OSDBTRFSRPM=false
 OSDLDISKFSRPM=true
 OSDZFSRPM=false
 SMPTYPES="smp bigsmp default ''"
@@ -177,6 +178,9 @@ Usage: ${0##*/} [OPTION]... [-- <lustre configure options>]
 
   --ldiskfs
     Build with ldiskfs support. (Deprecated, always true)
+
+  --btrfs
+    Build with btrfs support.
 
   --noiokit
     Do not build lustre-iokit RPM. Now true by default
@@ -998,6 +1002,11 @@ build_lustre() {
         osd_ldiskfs="yes"
     fi
 
+    local osd_btrfs=""
+    if $OSDBTRFSRPM; then
+	osd_btrfs="yes"
+    fi
+
     RPMBUILD_DEFS="$RPMBUILD_DEFS ${FIND_REQUIRES:+--define \"__find_requires $FIND_REQUIRES\"}"
     RPMBUILD_DEFS="$RPMBUILD_DEFS --define \"configure_args ${CONFIGURE_FLAGS}\""
     RPMBUILD_DEFS="$RPMBUILD_DEFS --define \"kdir $linux\""
@@ -1006,6 +1015,7 @@ build_lustre() {
     RPMBUILD_DEFS="$RPMBUILD_DEFS --define \"_topdir $TOPDIR\""
 
     eval $RPMBUILD $targets $rpmbuildopt "$LUSTRE" $RPMBUILD_DEFS \
+        ${osd_btrfs:+--with btrfs} \
         ${osd_zfs:+--with zfs} \
         ${osd_ldiskfs:+--with ldiskfs} 2>&1 || \
         fatal 1 "Error building rpms for $BUILD_ARCHS."
@@ -1970,7 +1980,7 @@ set -E
 
 [ -r ~/.lbuildrc ] && . ~/.lbuildrc
 
-options=$(getopt -o D:h -l kerneltree:,distro:,kernelrpm:,reusebuild:,patchless,ccache,norpm,external-patches:,timestamp:,extraversion:,kerneldir:,linux:,lustre:,nodownload,nosrc,noiokit,ofed-version:,mpss-version:,publish,disable-zfs,release,set-value:,src,stage:,target:,target-archs:,with-linux:,xen -- "$@")
+options=$(getopt -o D:h -l kerneltree:,distro:,kernelrpm:,reusebuild:,patchless,ccache,norpm,external-patches:,timestamp:,extraversion:,kerneldir:,linux:,lustre:,nodownload,nosrc,noiokit,ofed-version:,mpss-version:,publish,disable-zfs,release,set-value:,src,stage:,target:,target-archs:,with-linux:,xen,btrfs -- "$@")
 
 if [ $? != 0 ]; then
     usage 1
@@ -2107,6 +2117,10 @@ while [ "$1" ]; do
             eval $2
             shift 2
             ;;
+        --btrfs)
+            OSDBTRFSRPM=true
+            shift
+            ;;
         --)
             shift
             # there are actually some lustre configure flags that we need to
@@ -2174,6 +2188,7 @@ if [ -n "$MPSS_VERSION" ]; then
     PATCHLESS=true
     IOKITRPM=false
     LDISKFSRPM=false
+    BTRFSRPM=false
     WITH_ZFS="no"
 
     # define variables for cross compilation:

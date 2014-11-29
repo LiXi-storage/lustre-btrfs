@@ -1,0 +1,31 @@
+default: all
+
+MODULES := btreefs
+
+# copy makefile over to not break patches
+backfs_extra := $(wildcard @LINUX@/fs/btrfs/Makefile)
+
+backfs_headers := $(wildcard @BTRFS_SRC_DIR@/*.h)
+linux_headers := $(wildcard @LINUX@/include/linux/btrfs*.h)
+linux_new_headers :=
+linux_uapi_headers := $(wildcard @LINUX@/include/uapi/linux/btrfs*.h)
+trace_headers := $(wildcard @LINUX@/include/trace/events/btrfs*.h)
+tests_headers := $(wildcard @BTRFS_SRC_DIR@/tests/*.h)
+
+backfs_sources := $(filter-out %.mod.c,$(wildcard @BTRFS_SRC_DIR@/*.c))
+	tests_sources := $(filter-out %.mod.c,$(wildcard @BTRFS_SRC_DIR@/tests/*.c))
+
+btrfs_new_sources :=
+btrfs_new_headers :=
+
+new_sources := $(btrfs_new_sources)
+new_headers := $(btrfs_new_headers)
+
+btreefs_patched_sources := $(notdir $(backfs_sources) $(backfs_headers)) $(new_sources) $(new_headers)
+btreefs_sources := $(btreefs_patched_sources)
+
+btreefs-objs := $(filter-out check-integrity.o,$(filter-out acl.o,$(filter %.o,$(btreefs_sources:.c=.o))))
+
+EXTRA_PRE_CFLAGS := -I@LINUX@/fs -I@abs_top_srcdir@/btrfs
+
+@INCLUDE_RULES@

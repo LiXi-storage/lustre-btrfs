@@ -147,7 +147,7 @@ static int osd_mount(const struct lu_env *env,
 	if (opts != NULL)
 		strncat(options, opts, option_size);
 
-	type = get_fs_type("btrfs");
+	type = get_fs_type("btreefs");
 	if (!type) {
 		CERROR("%s: cannot find btrfs module\n", name);
 		GOTO(out, rc = -ENODEV);
