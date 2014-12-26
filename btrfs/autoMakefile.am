@@ -19,7 +19,6 @@ btreefs_sed_flags = \
 	-e "s/dx_hash_info/btrfs_dx_hash_info/g" \
 	-e "s/DX_HASH/btrfs_DX_HASH/g" \
 	-e "s/BTRFS/BTREEFS/g" -e "s/btrfs/btreefs/g" \
-	-e "s/BTREEFS_MINOR/BTRFS_MINOR/g" \
 	-e "s/BTREEFS_SUPER_MAGIC/BTRFS_SUPER_MAGIC/g" \
 	-e "s/FILEID_BTREEFS_WITH/FILEID_BTRFS_WITH/g"
 

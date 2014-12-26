@@ -1,0 +1,58 @@
+Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/ulist.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/ulist.c
++++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/ulist.c
+@@ -55,7 +55,6 @@ void ulist_init(struct ulist *ulist)
+ 	ulist->nodes_alloced = ULIST_SIZE;
+ 	ulist->root = RB_ROOT;
+ }
+-EXPORT_SYMBOL(ulist_init);
+ 
+ /**
+  * ulist_fini - free up additionally allocated memory for the ulist
+@@ -75,7 +74,6 @@ void ulist_fini(struct ulist *ulist)
+ 	ulist->nodes_alloced = 0;	/* in case ulist_fini is called twice */
+ 	ulist->root = RB_ROOT;
+ }
+-EXPORT_SYMBOL(ulist_fini);
+ 
+ /**
+  * ulist_reinit - prepare a ulist for reuse
+@@ -89,7 +87,6 @@ void ulist_reinit(struct ulist *ulist)
+ 	ulist_fini(ulist);
+ 	ulist_init(ulist);
+ }
+-EXPORT_SYMBOL(ulist_reinit);
+ 
+ /**
+  * ulist_alloc - dynamically allocate a ulist
+@@ -108,7 +105,6 @@ struct ulist *ulist_alloc(gfp_t gfp_mask
+ 
+ 	return ulist;
+ }
+-EXPORT_SYMBOL(ulist_alloc);
+ 
+ /**
+  * ulist_free - free dynamically allocated ulist
+@@ -123,7 +119,6 @@ void ulist_free(struct ulist *ulist)
+ 	ulist_fini(ulist);
+ 	kfree(ulist);
+ }
+-EXPORT_SYMBOL(ulist_free);
+ 
+ static struct ulist_node *ulist_rbtree_search(struct ulist *ulist, u64 val)
+ {
+@@ -248,7 +243,6 @@ int ulist_add_merge(struct ulist *ulist,
+ 
+ 	return 1;
+ }
+-EXPORT_SYMBOL(ulist_add);
+ 
+ /**
+  * ulist_next - iterate ulist
+@@ -275,4 +269,4 @@ struct ulist_node *ulist_next(struct uli
+ 
+ 	return &ulist->nodes[uiter->i++];
+ }
+-EXPORT_SYMBOL(ulist_next);
++
