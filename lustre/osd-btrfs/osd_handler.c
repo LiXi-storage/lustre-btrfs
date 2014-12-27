@@ -73,6 +73,103 @@
 
 #include "osd_internal.h"
 
+/* LIXI XXX */
+#include <btrfs/object-index.h>
+#include <btrfs/btreefs_inode.h>
+
+const int osd_item_number[OTO_NR] = {
+	/*
+	 * Insert object index
+	 * btrfs_oi_insert():
+	 * 1 for fid to ino/gen item
+	 * 1 for ino/gen to fid item
+	 */
+	[OTO_INDEX_INSERT]  = 2,
+	/*
+	 * Delete Object index
+	 * btrfs_oi_delete_with_fid():
+	 * 1 for fid to ino/gen item
+	 * 1 for ino/gen to fid item
+	 */
+	[OTO_INDEX_DELETE]  = 2,
+	/*
+	 * Create inode of an object
+	 * btrfs_create_inode():
+	 * At most btrfs_create()/btrfs_mkdir()/btrfs_mknod()
+	 * 2 for inode item and ref
+	 * 2 for dir items
+	 * 1 for xattr if selinux is on
+	 */
+	[OTO_OBJECT_CREATE] = 5,
+	/*
+	 * Delete inode of an object
+	 * At most btrfs_unlink()
+	 *
+	 * 1 for the possible orphan item
+	 * 1 for the dir item
+	 * 1 for the dir index
+	 * 1 for the inode ref
+	 * 1 for the inode
+	 */
+	[OTO_OBJECT_DELETE] = 5,
+	/*
+	 * Add a dentry to inode
+	 * btrfs_add_entry():
+	 * At most btrfs_create()/btrfs_mkdir()/btrfs_mknod()
+	 * 2 for inode item and ref
+	 * 2 for dir items
+	 * 1 for xattr if selinux is on
+	 */
+	[OTO_DENTRY_ADD] = 5,
+	/*
+	 * Delete a dentry of inode
+	 * btrfs_delet_entry():
+	 * At most btrfs_unlink()
+	 *
+	 * 1 for the possible orphan item
+	 * 1 for the dir item
+	 * 1 for the dir index
+	 * 1 for the inode ref
+	 * 1 for the inode
+	 */
+	[OTO_DENTRY_DELTE] = 5,
+	/*
+	 * btrfs_setattr():
+	 * btrfs_setsize()
+	 * 1 for the orphan item we're going to add
+	 * 1 for the orphan item deletion
+	 * btrfs_dirty_inode()
+	 */
+	[OTO_ATTR_SET_BASE] = 3,
+	/*
+	 * __btrfs_setxattr():
+	 */
+	[OTO_XATTR_SET]     = 2,
+	//[OTO_WRITE_BASE]    = 100,
+	//[OTO_WRITE_BLOCK]   = 100,
+	//[OTO_ATTR_SET_CHOWN] = 0,
+	/*
+	 * btrfs_truncate():
+	 * 1 for the truncate slack space
+	 * 1 for updating the inode
+	 */
+	[OTO_TRUNCATE_BASE] = 2,
+};
+
+/* Slab for OSD object allocation */
+struct kmem_cache *osd_object_kmem;
+
+static struct lu_kmem_descr osd_caches[] = {
+	{
+		.ckd_cache = &osd_object_kmem,
+		.ckd_name  = "btrfs_osd_obj",
+		.ckd_size  = sizeof(struct osd_object)
+	},
+	{
+		.ckd_cache = NULL
+	}
+};
+
 /*
  * Concurrency: shouldn't matter.
  */
@@ -171,6 +268,15 @@ static int osd_mount(const struct lu_env *env,
 	}
 #endif
 
+	/* XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX */
+	btreefs_oi_test(o->od_mnt->mnt_sb);
+	btreefs_record_test(o->od_mnt);
+
+	/* Initialize oi before any file create or file open */
+	rc = osd_oi_init(env, o);
+	if (rc)
+		GOTO(out_mnt, rc);
+
 #ifdef LIXI
 	inode = osd_sb(o)->s_root->d_inode;
 	lu_local_obj_fid(fid, OSD_FS_ROOT_OID);
@@ -186,9 +292,7 @@ static int osd_mount(const struct lu_env *env,
 
 	GOTO(out, rc = 0);
 
-#ifdef HAVE_DEV_SET_RDONLY /* LIXI */
 out_mnt:
-#endif /* LIXI */
 	mntput(o->od_mnt);
 	o->od_mnt = NULL;
 
@@ -325,6 +429,139 @@ int osd_statfs(const struct lu_env *env, struct dt_device *d,
         return result;
 }
 
+static struct thandle *osd_trans_create(const struct lu_env *env,
+					struct dt_device *dt)
+{
+	struct osd_thandle	*oh;
+	struct thandle		*th;
+	ENTRY;
+
+	/* alloc callback data */
+	OBD_ALLOC_PTR(oh);
+	if (oh == NULL)
+		RETURN(ERR_PTR(-ENOMEM));
+
+	th = &oh->ot_super;
+	th->th_dev = dt;
+	th->th_result = 0;
+	th->th_tags = LCT_TX_HANDLE;
+
+	INIT_LIST_HEAD(&oh->ot_dcb_list);
+	oh->ot_item_number = 0;
+	RETURN(th);
+}
+
+/*
+ * Concurrency: shouldn't matter.
+ */
+int osd_trans_start(const struct lu_env *env, struct dt_device *dt,
+                    struct thandle *th)
+{
+	struct osd_device		*dev = osd_dt_dev(dt);
+	struct btreefs_trans_handle	*trans;
+	struct osd_thandle		*oh;
+	int				 rc = 0;
+
+	ENTRY;
+	oh = container_of0(th, struct osd_thandle, ot_super);
+	LASSERT(oh != NULL);
+	LASSERT(oh->ot_handle == NULL);
+
+        rc = dt_txn_hook_start(env, dt, th);
+        if (rc != 0)
+                GOTO(out, rc);
+
+	trans = btreefs_trans_start(osd_sb(dev), oh->ot_item_number);
+	if (IS_ERR(trans))
+		GOTO(out, rc = PTR_ERR(trans));
+
+	lu_context_init(&th->th_ctx, th->th_tags);
+	lu_context_enter(&th->th_ctx);
+
+	lu_device_get(&dt->dd_lu_dev);
+	lu_ref_add_at(&dt->dd_lu_dev.ld_reference, &oh->ot_dev_link,
+		      "osd-tx", th);
+
+	oh->ot_handle = trans;
+out:
+	RETURN(rc);
+}
+
+/*
+ * Concurrency: shouldn't matter.
+ */
+static void osd_trans_commit_cb(struct btreefs_trans_cb_entry *callback,
+                                int error)
+{
+        struct osd_thandle *oh = container_of0(callback,
+        				       struct osd_thandle,
+        				       ot_callback);
+        struct thandle     *th  = &oh->ot_super;
+        struct lu_device   *lud = &th->th_dev->dd_lu_dev;
+        struct dt_txn_commit_cb *dcb, *tmp;
+
+        if (error)
+                CERROR("transaction @0x%p commit error: %d\n", th, error);
+
+        dt_txn_hook_commit(th);
+
+	/* call per-transaction callbacks if any */
+	list_for_each_entry_safe(dcb, tmp, &oh->ot_dcb_list, dcb_linkage) {
+		LASSERTF(dcb->dcb_magic == TRANS_COMMIT_CB_MAGIC,
+			 "commit callback entry: magic=%x name='%s'\n",
+			 dcb->dcb_magic, dcb->dcb_name);
+		list_del_init(&dcb->dcb_linkage);
+		dcb->dcb_func(NULL, th, dcb, error);
+	}
+
+	lu_ref_del_at(&lud->ld_reference, &oh->ot_dev_link, "osd-tx", th);
+        lu_device_put(lud);
+        th->th_dev = NULL;
+
+        lu_context_exit(&th->th_ctx);
+        lu_context_fini(&th->th_ctx);
+	OBD_FREE_PTR(oh);
+}
+
+/*
+ * Concurrency: shouldn't matter.
+ */
+static int osd_trans_stop(const struct lu_env *env, struct dt_device *dt,
+			  struct thandle *th)
+{
+	struct osd_device 	*dev = osd_dt_dev(dt);
+	struct osd_thandle	*oh;
+	int			 rc = 0;
+
+	ENTRY;
+	oh = container_of0(th, struct osd_thandle, ot_super);
+	LASSERT(oh != NULL);
+
+	if (oh->ot_handle != NULL) {
+		btreefs_add_transaction_callback(oh->ot_handle,
+						 osd_trans_commit_cb,
+						 &oh->ot_callback);
+		rc = btreefs_trans_stop(osd_sb(dev), oh->ot_handle);
+	} else {
+		OBD_FREE_PTR(oh);
+	}
+
+	RETURN(rc);
+}
+
+static int osd_trans_cb_add(struct thandle *th, struct dt_txn_commit_cb *dcb)
+{
+	struct osd_thandle *oh = container_of0(th, struct osd_thandle,
+					       ot_super);
+
+	LASSERT(dcb->dcb_magic == TRANS_COMMIT_CB_MAGIC);
+	LASSERT(&dcb->dcb_func != NULL);
+	list_add(&dcb->dcb_linkage, &oh->ot_dcb_list);
+
+	return 0;
+}
+
+
 static const struct dt_device_operations osd_dt_ops = {
 #ifdef LIXI
 	.dt_root_get       = osd_root_get,
@@ -340,12 +577,12 @@ static const struct dt_device_operations osd_dt_ops = {
 #else /* LIXI */
 	.dt_root_get       = osd_root_get,
 	.dt_statfs         = osd_statfs,
-	.dt_trans_create   = NULL,
-	.dt_trans_start    = NULL,
-	.dt_trans_stop     = NULL,
-	.dt_trans_cb_add   = NULL,
+	.dt_trans_create   = osd_trans_create,
+	.dt_trans_start    = osd_trans_start,
+	.dt_trans_stop     = osd_trans_stop,
+	.dt_trans_cb_add   = osd_trans_cb_add,
 	.dt_conf_get       = osd_conf_get,
-	.dt_sync           = NULL,
+	.dt_sync           = osd_sync,
 	.dt_ro             = NULL,
 	.dt_commit_async   = NULL,
 #endif /* LIXI */
@@ -395,11 +632,9 @@ static int osd_device_init0(const struct lu_env *env,
 	if (rc != 0)
 		GOTO(out, rc);
 
-#ifdef LIXI
 	rc = osd_obj_map_init(env, o);
 	if (rc != 0)
 		GOTO(out_mnt, rc);
-#endif /* LIXI */
 
 	rc = lu_site_init(&o->od_site, l);
 	if (rc != 0)
@@ -670,11 +905,21 @@ static void *osd_key_init(const struct lu_context *ctx,
 	struct osd_thread_info *info;
 
 	OBD_ALLOC_PTR(info);
-	if (info != NULL)
-		info->oti_env = container_of(ctx, struct lu_env, le_ctx);
-	else
-		info = ERR_PTR(-ENOMEM);
+	if (info == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	info->oti_env = container_of(ctx, struct lu_env, le_ctx);
+
+	/* LIXI TODO: choose an appropriate number */
+	info->oti_nrptrs = PAGE_CACHE_SIZE / (sizeof(struct page *));
+	OBD_ALLOC(info->oti_pages, info->oti_nrptrs * sizeof(struct page *));
+	if (info->oti_pages == NULL)
+		goto out_free_info;
+
 	return info;
+out_free_info:
+	OBD_FREE_PTR(info);
+	return ERR_PTR(-ENOMEM);
 }
 
 static void osd_key_fini(const struct lu_context *ctx,
@@ -682,6 +927,7 @@ static void osd_key_fini(const struct lu_context *ctx,
 {
 	struct osd_thread_info *info = data;
 
+	OBD_FREE(info->oti_pages, info->oti_nrptrs * sizeof(struct page *));
 	OBD_FREE_PTR(info);
 }
 
@@ -690,7 +936,7 @@ static void osd_key_exit(const struct lu_context *ctx,
 {
 	struct osd_thread_info *info = data;
 
-	memset(info, 0, sizeof(*info));
+	LASSERT(info->oti_pages != NULL);
 }
 
 struct lu_context_key osd_key = {
@@ -721,19 +967,15 @@ static struct lu_device *osd_device_fini(const struct lu_env *env,
 	osd_procfs_fini(o);
 #ifdef LIXI
 	osd_scrub_cleanup(env, o);
-	osd_obj_map_fini(o);
 #endif /* LIXI */
+	osd_obj_map_fini(o);
 	osd_umount(env, o);
 
 	RETURN(NULL);
 }
 
 const struct lu_device_operations osd_lu_ops = {
-#ifdef LIXI
 	.ldo_object_alloc      = osd_object_alloc,
-#else /* LIXI */
-	.ldo_object_alloc      = NULL,
-#endif /* LIXI */
 	.ldo_process_config    = osd_process_config,
 	.ldo_recovery_complete = osd_recovery_complete,
 	.ldo_prepare           = osd_prepare,
@@ -773,14 +1015,21 @@ static int __init osd_mod_init(void)
 {
 	int rc;
 
+	rc = lu_kmem_init(osd_caches);
+	if (rc)
+		return rc;
+
 	rc = class_register_type(&osd_obd_device_ops, NULL, true, NULL,
 				 LUSTRE_OSD_BTRFS_NAME, &osd_device_type);
-	return 0;
+	if (rc)
+		lu_kmem_fini(osd_caches);
+	return rc;
 }
 
 static void __exit osd_mod_exit(void)
 {
 	class_unregister_type(LUSTRE_OSD_BTRFS_NAME);
+	lu_kmem_fini(osd_caches);
 }
 
 MODULE_AUTHOR("DataDirect Networks, Inc. <http://www.ddn.com/>");

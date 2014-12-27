@@ -676,15 +676,9 @@ static void mgc_requeue_add(struct config_llog_data *cld)
 }
 
 /********************** class fns **********************/
-#ifdef LIXI
 static int mgc_local_llog_init(const struct lu_env *env,
 			       struct obd_device *obd,
 			       struct obd_device *disk)
-#else /* LIXI */
-int mgc_local_llog_init(const struct lu_env *env,
-			       struct obd_device *obd,
-			       struct obd_device *disk)
-#endif /* LIXI */
 {
 	struct llog_ctxt	*ctxt;
 	int			 rc;
@@ -704,13 +698,8 @@ int mgc_local_llog_init(const struct lu_env *env,
 	RETURN(0);
 }
 
-#ifdef LIXI
 static int mgc_local_llog_fini(const struct lu_env *env,
 			       struct obd_device *obd)
-#else /* LIXI */
-int mgc_local_llog_fini(const struct lu_env *env,
-			       struct obd_device *obd)
-#endif /* LIXI */
 {
 	struct llog_ctxt *ctxt;
 
@@ -726,10 +715,8 @@ static int mgc_fs_setup(struct obd_device *obd, struct super_block *sb)
 {
 	struct lustre_sb_info	*lsi = s2lsi(sb);
 	struct client_obd	*cli = &obd->u.cli;
-#ifdef LIXI
 	struct lu_fid		 rfid, fid;
 	struct dt_object	*root, *dto;
-#endif /* LIXI */
 	struct lu_env		*env;
 	int			 rc = 0;
 
@@ -750,11 +737,9 @@ static int mgc_fs_setup(struct obd_device *obd, struct super_block *sb)
 	if (rc)
 		GOTO(out_err, rc);
 
-#ifdef LIXI
 	fid.f_seq = FID_SEQ_LOCAL_NAME;
 	fid.f_oid = 1;
 	fid.f_ver = 0;
-	/* TODO LIXI: add this back */
 	rc = local_oid_storage_init(env, lsi->lsi_dt_dev, &fid,
 				    &cli->cl_mgc_los);
 	if (rc)
@@ -782,7 +767,6 @@ static int mgc_fs_setup(struct obd_device *obd, struct super_block *sb)
 	rc = mgc_local_llog_init(env, obd, lsi->lsi_osd_exp->exp_obd);
 	if (rc)
 		GOTO(out_llog, rc);
-#endif /* LIXI */
 
 	/* We take an obd ref to insure that we can't get to mgc_cleanup
 	 * without calling mgc_fs_cleanup first. */
@@ -790,24 +774,18 @@ static int mgc_fs_setup(struct obd_device *obd, struct super_block *sb)
 
 	/* We keep the cl_mgc_sem until mgc_fs_cleanup */
 	EXIT;
-#ifdef LIXI
 out_llog:
 	if (rc) {
 		lu_object_put(env, &cli->cl_mgc_configs_dir->do_lu);
 		cli->cl_mgc_configs_dir = NULL;
 	}
 out_los:
-#endif /* LIXI */
 	if (rc < 0) {
-#ifdef LIXI
 		local_oid_storage_fini(env, cli->cl_mgc_los);
 		cli->cl_mgc_los = NULL;
-#endif /* LIXI */
 		mutex_unlock(&cli->cl_mgc_mutex);
 	}
-#ifdef LIXI
 out_env:
-#endif /* LIXI */
 	lu_env_fini(env);
 out_err:
 	OBD_FREE_PTR(env);
@@ -816,16 +794,12 @@ out_err:
 
 static int mgc_fs_cleanup(struct obd_device *obd)
 {
-#ifdef LIXI
 	struct lu_env		 env;
-#endif /* LIXI */
 	struct client_obd	*cli = &obd->u.cli;
-#ifdef LIXI
 	int			 rc;
-#endif /* LIXI */
 
 	ENTRY;
-#ifdef LIXI
+
 	LASSERT(cli->cl_mgc_los != NULL);
 
 	rc = lu_env_init(&env, LCT_MG_THREAD);
@@ -842,7 +816,6 @@ static int mgc_fs_cleanup(struct obd_device *obd)
 	lu_env_fini(&env);
 
 unlock:
-#endif /* LIXI */
 	class_decref(obd, "mgc_fs", obd);
 	mutex_unlock(&cli->cl_mgc_mutex);
 

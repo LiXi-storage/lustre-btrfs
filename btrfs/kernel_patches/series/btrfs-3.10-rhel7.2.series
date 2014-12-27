@@ -1,0 +1,6 @@
+rhel7.2/btrfs-add-object-index-support.patch
+rhel7.2/btrfs-add-transaction-commit-callback.patch
+rhel7.2/btrfs-add-write-read-record.patch
+rhel7.2/btrfs-osd-iop-common.patch
+rhel7.2/mv-xattr-macros-into-btrfs.patch
+

@@ -56,6 +56,7 @@
 #ifdef HAVE_SELINUX
 #include <selinux/selinux.h>
 #endif
+#include <selinux/get_context_list.h>
 
 extern char *progname;
 extern int verbose;

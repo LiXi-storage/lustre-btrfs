@@ -1,0 +1,1364 @@
+From 2d74ff457e6cf699f31c7493401f50e12ec34cdd Mon Sep 17 00:00:00 2001
+From: Wang Shilong <wangshilong1991@gmail.com>
+Date: Mon, 16 Mar 2015 10:56:45 -0400
+Subject: [PATCH 4/4] btrfs osd iop common
+
+---
+ fs/btrfs/btrfs_inode.h |  18 ++
+ fs/btrfs/extent-tree.c |   4 +
+ fs/btrfs/extent_io.c   | 236 ++++++++++++++++++-------
+ fs/btrfs/extent_io.h   |   8 +-
+ fs/btrfs/file.c        |   1 +
+ fs/btrfs/inode.c       | 469 ++++++++++++++++++++++++++++++++++++++++++++-----
+ fs/btrfs/xattr.c       |   1 +
+ 7 files changed, 623 insertions(+), 114 deletions(-)
+
+diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
+index ffe3c14..b92a781 100644
+--- a/fs/btrfs/btrfs_inode.h
++++ b/fs/btrfs/btrfs_inode.h
+@@ -356,4 +356,22 @@ void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
+ 				    struct btrfs_trans_cb_entry *callback);
+ bool btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
+ 					struct btrfs_trans_cb_entry *callback);
++int btrfs_update_inode(struct btrfs_trans_handle *trans,
++		       struct btrfs_root *root, struct inode *inode);
++int btrfs_dirty_inode(struct inode *inode);
++struct inode *btrfs_create_inode(struct btrfs_trans_handle *trans,
++				 struct inode *dir, umode_t mode,
++				 dev_t rdev, u64 *index);
++int btrfs_add_entry(struct btrfs_trans_handle *trans,
++		    struct inode *dir,
++		    struct inode *inode,
++		    struct qstr *d_name,
++		    u64 *index);
++int btrfs_punch(struct inode *inode, struct btrfs_trans_handle *trans,
++		__u64 start, __u64 end);
++int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages);
++int btrfs_write_commit(struct inode *inode, struct page **pages, int nr_pages);
++int __btrfs_setxattr(struct btrfs_trans_handle *trans,
++		     struct inode *inode, const char *name,
++		     const void *value, size_t size, int flags);
+ #endif
+diff --git a/fs/btrfs/extent-tree.c b/fs/btrfs/extent-tree.c
+index a684086..c9f466c 100644
+--- a/fs/btrfs/extent-tree.c
++++ b/fs/btrfs/extent-tree.c
+@@ -3781,6 +3781,7 @@ commit_trans:
+ 
+ 	return 0;
+ }
++EXPORT_SYMBOL(btrfs_check_data_free_space);
+ 
+ /*
+  * Called if we need to clear a data reservation for this inode.
+@@ -3801,6 +3802,7 @@ void btrfs_free_reserved_data_space(struct inode *inode, u64 bytes)
+ 				      data_sinfo->flags, bytes, 0);
+ 	spin_unlock(&data_sinfo->lock);
+ }
++EXPORT_SYMBOL(btrfs_free_reserved_data_space);
+ 
+ static void force_metadata_allocation(struct btrfs_fs_info *info)
+ {
+@@ -5287,6 +5289,7 @@ out_fail:
+ 		mutex_unlock(&BTRFS_I(inode)->delalloc_mutex);
+ 	return ret;
+ }
++EXPORT_SYMBOL(btrfs_delalloc_reserve_metadata);
+ 
+ /**
+  * btrfs_delalloc_release_metadata - release a metadata reservation for an inode
+@@ -5374,6 +5377,7 @@ void btrfs_delalloc_release_space(struct inode *inode, u64 num_bytes)
+ 	btrfs_delalloc_release_metadata(inode, num_bytes);
+ 	btrfs_free_reserved_data_space(inode, num_bytes);
+ }
++EXPORT_SYMBOL(btrfs_delalloc_release_space);
+ 
+ static int update_block_group(struct btrfs_root *root,
+ 			      u64 bytenr, u64 num_bytes, int alloc)
+diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
+index 6afb46a..80429aa 100644
+--- a/fs/btrfs/extent_io.c
++++ b/fs/btrfs/extent_io.c
+@@ -1574,9 +1574,24 @@ out:
+ 	return found;
+ }
+ 
++static inline int page_is_locked(struct page **locked_pages,
++				 int locked_page_num,
++				 struct page *page)
++{
++	int i;
++
++	for (i = 0; i < locked_page_num; i++) {
++		if (locked_pages[i] == page)
++			return 1;
++	}
++	return 0;
++}
++
+ static noinline void __unlock_for_delalloc(struct inode *inode,
+ 					   struct page *locked_page,
+-					   u64 start, u64 end)
++					   u64 start, u64 end,
++					   struct page **locked_pages,
++					   int locked_page_num)
+ {
+ 	int ret;
+ 	struct page *pages[16];
+@@ -1593,8 +1608,11 @@ static noinline void __unlock_for_delalloc(struct inode *inode,
+ 				     min_t(unsigned long, nr_pages,
+ 				     ARRAY_SIZE(pages)), pages);
+ 		for (i = 0; i < ret; i++) {
+-			if (pages[i] != locked_page)
+-				unlock_page(pages[i]);
++			if (!page_is_locked(locked_pages, locked_page_num,
++					    pages[i])) {
++				if (pages[i] != locked_page)
++					unlock_page(pages[i]);
++			}
+ 			page_cache_release(pages[i]);
+ 		}
+ 		nr_pages -= ret;
+@@ -1606,7 +1624,9 @@ static noinline void __unlock_for_delalloc(struct inode *inode,
+ static noinline int lock_delalloc_pages(struct inode *inode,
+ 					struct page *locked_page,
+ 					u64 delalloc_start,
+-					u64 delalloc_end)
++					u64 delalloc_end,
++					struct page **locked_pages,
++					int locked_page_num)
+ {
+ 	unsigned long index = delalloc_start >> PAGE_CACHE_SHIFT;
+ 	unsigned long start_index = index;
+@@ -1637,18 +1657,21 @@ static noinline int lock_delalloc_pages(struct inode *inode,
+ 			 * the caller is taking responsibility for
+ 			 * locked_page
+ 			 */
+-			if (pages[i] != locked_page) {
+-				lock_page(pages[i]);
+-				if (!PageDirty(pages[i]) ||
+-				    pages[i]->mapping != inode->i_mapping) {
+-					ret = -EAGAIN;
+-					unlock_page(pages[i]);
+-					page_cache_release(pages[i]);
+-					goto done;
++			if (!page_is_locked(locked_pages, locked_page_num,
++					    pages[i])) {
++				if (pages[i] != locked_page) {
++					lock_page(pages[i]);
++					if (!PageDirty(pages[i]) ||
++					    pages[i]->mapping != inode->i_mapping) {
++						ret = -EAGAIN;
++						unlock_page(pages[i]);
++						page_cache_release(pages[i]);
++						goto done;
++					}
+ 				}
++				pages_locked++;
+ 			}
+ 			page_cache_release(pages[i]);
+-			pages_locked++;
+ 		}
+ 		nrpages -= ret;
+ 		index += ret;
+@@ -1660,7 +1683,8 @@ done:
+ 		__unlock_for_delalloc(inode, locked_page,
+ 			      delalloc_start,
+ 			      ((u64)(start_index + pages_locked - 1)) <<
+-			      PAGE_CACHE_SHIFT);
++			      PAGE_CACHE_SHIFT,
++			      locked_pages, locked_page_num);
+ 	}
+ 	return ret;
+ }
+@@ -1674,7 +1698,9 @@ done:
+ STATIC u64 find_lock_delalloc_range(struct inode *inode,
+ 				    struct extent_io_tree *tree,
+ 				    struct page *locked_page, u64 *start,
+-				    u64 *end, u64 max_bytes)
++				    u64 *end, u64 max_bytes,
++				    struct page **locked_pages,
++				    int locked_page_num)
+ {
+ 	u64 delalloc_start;
+ 	u64 delalloc_end;
+@@ -1712,7 +1738,8 @@ again:
+ 
+ 	/* step two, lock all the pages after the page that has start */
+ 	ret = lock_delalloc_pages(inode, locked_page,
+-				  delalloc_start, delalloc_end);
++				  delalloc_start, delalloc_end, locked_pages,
++				  locked_page_num);
+ 	if (ret == -EAGAIN) {
+ 		/* some of the pages are gone, lets avoid looping by
+ 		 * shortening the size of the delalloc range we're searching
+@@ -1740,7 +1767,8 @@ again:
+ 		unlock_extent_cached(tree, delalloc_start, delalloc_end,
+ 				     &cached_state, GFP_NOFS);
+ 		__unlock_for_delalloc(inode, locked_page,
+-			      delalloc_start, delalloc_end);
++			      delalloc_start, delalloc_end,
++			      locked_pages, locked_page_num);
+ 		cond_resched();
+ 		goto again;
+ 	}
+@@ -1754,7 +1782,9 @@ out_failed:
+ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
+ 				 struct page *locked_page,
+ 				 unsigned long clear_bits,
+-				 unsigned long page_ops)
++				 unsigned long page_ops,
++				 struct page **locked_pages,
++				 int locked_page_num)
+ {
+ 	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
+ 	int ret;
+@@ -1781,7 +1811,9 @@ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
+ 				SetPagePrivate2(pages[i]);
+ 
+ 			if (pages[i] == locked_page) {
+-				page_cache_release(pages[i]);
++				if (!page_is_locked(locked_pages,
++						    locked_page_num, pages[i]))
++					page_cache_release(pages[i]);
+ 				continue;
+ 			}
+ 			if (page_ops & PAGE_CLEAR_DIRTY)
+@@ -1792,9 +1824,12 @@ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
+ 				SetPageError(pages[i]);
+ 			if (page_ops & PAGE_END_WRITEBACK)
+ 				end_page_writeback(pages[i]);
+-			if (page_ops & PAGE_UNLOCK)
+-				unlock_page(pages[i]);
+-			page_cache_release(pages[i]);
++			if (!page_is_locked(locked_pages,
++					    locked_page_num, pages[i])) {
++				if (page_ops & PAGE_UNLOCK)
++					unlock_page(pages[i]);
++				page_cache_release(pages[i]);
++			}
+ 		}
+ 		nr_pages -= ret;
+ 		index += ret;
+@@ -2909,7 +2944,8 @@ static int __do_readpage(struct extent_io_tree *tree,
+ 			 get_extent_t *get_extent,
+ 			 struct extent_map **em_cached,
+ 			 struct bio **bio, int mirror_num,
+-			 unsigned long *bio_flags, int rw)
++			 unsigned long *bio_flags, int rw,
++			 int keep_page)
+ {
+ 	struct inode *inode = page->mapping->host;
+ 	u64 start = page_offset(page);
+@@ -3072,7 +3108,8 @@ out:
+ 	if (!nr) {
+ 		if (!PageError(page))
+ 			SetPageUptodate(page);
+-		unlock_page(page);
++		if (!keep_page)
++			unlock_page(page);
+ 	}
+ 	return 0;
+ }
+@@ -3083,7 +3120,8 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
+ 					     get_extent_t *get_extent,
+ 					     struct extent_map **em_cached,
+ 					     struct bio **bio, int mirror_num,
+-					     unsigned long *bio_flags, int rw)
++					     unsigned long *bio_flags, int rw,
++					     int keep_page)
+ {
+ 	struct inode *inode;
+ 	struct btrfs_ordered_extent *ordered;
+@@ -3103,8 +3141,9 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
+ 
+ 	for (index = 0; index < nr_pages; index++) {
+ 		__do_readpage(tree, pages[index], get_extent, em_cached, bio,
+-			      mirror_num, bio_flags, rw);
+-		page_cache_release(pages[index]);
++			      mirror_num, bio_flags, rw, keep_page);
++		if (!keep_page)
++			page_cache_release(pages[index]);
+ 	}
+ }
+ 
+@@ -3113,7 +3152,8 @@ static void __extent_readpages(struct extent_io_tree *tree,
+ 			       int nr_pages, get_extent_t *get_extent,
+ 			       struct extent_map **em_cached,
+ 			       struct bio **bio, int mirror_num,
+-			       unsigned long *bio_flags, int rw)
++			       unsigned long *bio_flags, int rw,
++			       int keep_page)
+ {
+ 	u64 start = 0;
+ 	u64 end = 0;
+@@ -3134,7 +3174,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
+ 						  index - first_index, start,
+ 						  end, get_extent, em_cached,
+ 						  bio, mirror_num, bio_flags,
+-						  rw);
++						  rw, keep_page);
+ 			start = page_start;
+ 			end = start + PAGE_CACHE_SIZE - 1;
+ 			first_index = index;
+@@ -3145,7 +3185,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
+ 		__do_contiguous_readpages(tree, &pages[first_index],
+ 					  index - first_index, start,
+ 					  end, get_extent, em_cached, bio,
+-					  mirror_num, bio_flags, rw);
++					  mirror_num, bio_flags, rw, keep_page);
+ }
+ 
+ static int __extent_read_full_page(struct extent_io_tree *tree,
+@@ -3171,7 +3211,7 @@ static int __extent_read_full_page(struct extent_io_tree *tree,
+ 	}
+ 
+ 	ret = __do_readpage(tree, page, get_extent, NULL, bio, mirror_num,
+-			    bio_flags, rw);
++			    bio_flags, rw, 0);
+ 	return ret;
+ }
+ 
+@@ -3197,7 +3237,7 @@ int extent_read_full_page_nolock(struct extent_io_tree *tree, struct page *page,
+ 	int ret;
+ 
+ 	ret = __do_readpage(tree, page, get_extent, NULL, &bio, mirror_num,
+-				      &bio_flags, READ);
++				      &bio_flags, READ, 0);
+ 	if (bio)
+ 		ret = submit_one_bio(READ, bio, mirror_num, bio_flags);
+ 	return ret;
+@@ -3227,7 +3267,8 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+ 			      struct page *page, struct writeback_control *wbc,
+ 			      struct extent_page_data *epd,
+ 			      u64 delalloc_start,
+-			      unsigned long *nr_written)
++			      unsigned long *nr_written,
++			      struct page **locked_pages, int locked_page_num)
+ {
+ 	struct extent_io_tree *tree = epd->tree;
+ 	u64 page_end = delalloc_start + PAGE_CACHE_SIZE - 1;
+@@ -3245,7 +3286,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+ 					       page,
+ 					       &delalloc_start,
+ 					       &delalloc_end,
+-					       128 * 1024 * 1024);
++					       128 * 1024 * 1024,
++					       locked_pages,
++					       locked_page_num);
+ 		if (nr_delalloc == 0) {
+ 			delalloc_start = delalloc_end + 1;
+ 			continue;
+@@ -3254,7 +3297,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+ 					       delalloc_start,
+ 					       delalloc_end,
+ 					       &page_started,
+-					       nr_written);
++					       nr_written,
++					       locked_pages,
++					       locked_page_num);
+ 		/* File system has been set read-only */
+ 		if (ret) {
+ 			SetPageError(page);
+@@ -3318,7 +3363,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+ 				 struct extent_page_data *epd,
+ 				 loff_t i_size,
+ 				 unsigned long nr_written,
+-				 int write_flags, int *nr_ret)
++				 int write_flags, int *nr_ret,
++				 int keep_page)
+ {
+ 	struct extent_io_tree *tree = epd->tree;
+ 	u64 start = page_offset(page);
+@@ -3350,7 +3396,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+ 				redirty_page_for_writepage(wbc, page);
+ 
+ 			update_nr_written(page, wbc, nr_written);
+-			unlock_page(page);
++			if (!keep_page)
++				unlock_page(page);
+ 			ret = 1;
+ 			goto done_unlocked;
+ 		}
+@@ -3476,7 +3523,8 @@ done_unlocked:
+  * and the end_io handler clears the writeback ranges
+  */
+ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+-			      void *data)
++			      void *data, int keep_page,
++			      struct page **locked_pages, int locked_page_num)
+ {
+ 	struct inode *inode = page->mapping->host;
+ 	struct extent_page_data *epd = data;
+@@ -3501,36 +3549,36 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+ 
+ 	ClearPageError(page);
+ 
+-	pg_offset = i_size & (PAGE_CACHE_SIZE - 1);
+-	if (page->index > end_index ||
+-	   (page->index == end_index && !pg_offset)) {
+-		page->mapping->a_ops->invalidatepage(page, 0);
+-		unlock_page(page);
+-		return 0;
+-	}
+-
+-	if (page->index == end_index) {
+-		char *userpage;
+-
+-		userpage = kmap_atomic(page);
+-		memset(userpage + pg_offset, 0,
+-		       PAGE_CACHE_SIZE - pg_offset);
+-		kunmap_atomic(userpage);
+-		flush_dcache_page(page);
++	if (!keep_page) {
++		pg_offset = i_size & (PAGE_CACHE_SIZE - 1);
++		if (page->index > end_index ||
++		   (page->index == end_index && !pg_offset)) {
++			page->mapping->a_ops->invalidatepage(page, 0);
++			unlock_page(page);
++			return 0;
++		}
++		if (page->index == end_index) {
++			char *userpage;
++			userpage = kmap_atomic(page);
++			memset(userpage + pg_offset, 0,
++			       PAGE_CACHE_SIZE - pg_offset);
++			kunmap_atomic(userpage);
++			flush_dcache_page(page);
++		}
++		pg_offset = 0;
+ 	}
+ 
+-	pg_offset = 0;
+-
+ 	set_page_extent_mapped(page);
+ 
+-	ret = writepage_delalloc(inode, page, wbc, epd, start, &nr_written);
++	ret = writepage_delalloc(inode, page, wbc, epd, start, &nr_written,
++				locked_pages, locked_page_num);
+ 	if (ret == 1)
+ 		goto done_unlocked;
+ 	if (ret)
+ 		goto done;
+ 
+ 	ret = __extent_writepage_io(inode, page, wbc, epd,
+-				    i_size, nr_written, write_flags, &nr);
++				    i_size, nr_written, write_flags, &nr, keep_page);
+ 	if (ret == 1)
+ 		goto done_unlocked;
+ 
+@@ -3544,7 +3592,8 @@ done:
+ 		ret = ret < 0 ? ret : -EIO;
+ 		end_extent_writepage(page, ret, start, page_end);
+ 	}
+-	unlock_page(page);
++	if (!keep_page)
++		unlock_page(page);
+ 	return ret;
+ 
+ done_unlocked:
+@@ -4082,7 +4131,7 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
+ 		.bio_flags = 0,
+ 	};
+ 
+-	ret = __extent_writepage(page, wbc, &epd);
++	ret = __extent_writepage(page, wbc, &epd, 0, NULL, 0);
+ 
+ 	flush_epd_write_bio(&epd);
+ 	return ret;
+@@ -4116,7 +4165,7 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+ 	while (start <= end) {
+ 		page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
+ 		if (clear_page_dirty_for_io(page))
+-			ret = __extent_writepage(page, &wbc_writepages, &epd);
++			ret = __extent_writepage(page, &wbc_writepages, &epd, 0, NULL, 0);
+ 		else {
+ 			if (tree->ops && tree->ops->writepage_end_io_hook)
+ 				tree->ops->writepage_end_io_hook(page, start,
+@@ -4132,6 +4181,12 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+ 	return ret;
+ }
+ 
++static int extent_writepage(struct page *page, struct writeback_control *wbc,
++			    void *data)
++{
++	return __extent_writepage(page, wbc, data, 0, NULL, 0);
++}
++
+ int extent_writepages(struct extent_io_tree *tree,
+ 		      struct address_space *mapping,
+ 		      get_extent_t *get_extent,
+@@ -4148,7 +4203,7 @@ int extent_writepages(struct extent_io_tree *tree,
+ 	};
+ 
+ 	ret = extent_write_cache_pages(tree, mapping, wbc,
+-				       __extent_writepage, &epd,
++				       extent_writepage, &epd,
+ 				       flush_write_bio);
+ 	flush_epd_write_bio(&epd);
+ 	return ret;
+@@ -4182,12 +4237,12 @@ int extent_readpages(struct extent_io_tree *tree,
+ 		if (nr < ARRAY_SIZE(pagepool))
+ 			continue;
+ 		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
+-				   &bio, 0, &bio_flags, READ);
++				   &bio, 0, &bio_flags, READ, 0);
+ 		nr = 0;
+ 	}
+ 	if (nr)
+ 		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
+-				   &bio, 0, &bio_flags, READ);
++				   &bio, 0, &bio_flags, READ, 0);
+ 
+ 	if (em_cached)
+ 		free_extent_map(em_cached);
+@@ -5597,3 +5652,56 @@ int try_release_extent_buffer(struct page *page)
+ 
+ 	return release_extent_buffer(eb);
+ }
++
++int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages)
++{
++	struct extent_map *em_cached = NULL;
++	struct bio *bio = NULL;
++	unsigned long bio_flags = 0;
++
++	__extent_readpages(&BTRFS_I(inode)->io_tree,
++			   pages, nr_pages, btrfs_get_extent, &em_cached,
++			   &bio, 0, &bio_flags, READ, 1);
++
++	if (em_cached)
++		free_extent_map(em_cached);
++
++	if (bio)
++		return submit_one_bio(READ, bio, 0, bio_flags);
++	return 0;
++}
++EXPORT_SYMBOL(btrfs_read_prep);
++
++int btrfs_write_commit(struct inode *inode, struct page **pages, int nr_pages)//,
++//		       loff_t pos, size_t write_bytes)
++{
++	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
++	struct writeback_control wbc = {
++		.sync_mode = WB_SYNC_NONE,
++		.nr_to_write = LONG_MAX,
++	};
++	struct extent_page_data epd = {
++		.bio = NULL,
++		.tree = tree,
++		.get_extent = btrfs_get_extent,
++		.extent_locked = 0,
++		.sync_io = 0,
++		.bio_flags = 0,
++	};
++	int i;
++	int ret = 0;
++
++	for (i = 0; i < nr_pages; i++) {
++		/* The page could have been commited in earlier iterations, skip it if so */
++		//if (PageWriteback(pages[i]) || !clear_page_dirty_for_io(pages[i]));
++		if(!clear_page_dirty_for_io(pages[i]))
++		 	continue;
++		ret = __extent_writepage(pages[i], &wbc, &epd, 1, pages, nr_pages);
++		if (ret)
++			break;
++	}
++
++	flush_epd_write_bio(&epd);
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_write_commit);
+diff --git a/fs/btrfs/extent_io.h b/fs/btrfs/extent_io.h
+index ece9ce8..f8d916c 100644
+--- a/fs/btrfs/extent_io.h
++++ b/fs/btrfs/extent_io.h
+@@ -67,7 +67,9 @@ typedef	int (extent_submit_bio_hook_t)(struct inode *inode, int rw,
+ struct extent_io_ops {
+ 	int (*fill_delalloc)(struct inode *inode, struct page *locked_page,
+ 			     u64 start, u64 end, int *page_started,
+-			     unsigned long *nr_written);
++			     unsigned long *nr_written,
++			     struct page **locked_pages,
++			     int locked_page_num);
+ 	int (*writepage_start_hook)(struct page *page, u64 start, u64 end);
+ 	int (*writepage_io_hook)(struct page *page, u64 start, u64 end);
+ 	extent_submit_bio_hook_t *submit_bio_hook;
+@@ -323,7 +325,9 @@ int extent_range_redirty_for_io(struct inode *inode, u64 start, u64 end);
+ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
+ 				 struct page *locked_page,
+ 				 unsigned long bits_to_clear,
+-				 unsigned long page_ops);
++				 unsigned long page_ops,
++				 struct page **locked_pages,
++				 int locked_page_num);
+ struct bio *
+ btrfs_bio_alloc(struct block_device *bdev, u64 first_sector, int nr_vecs,
+ 		gfp_t gfp_flags);
+diff --git a/fs/btrfs/file.c b/fs/btrfs/file.c
+index aaca894..427750f 100644
+--- a/fs/btrfs/file.c
++++ b/fs/btrfs/file.c
+@@ -532,6 +532,7 @@ int btrfs_dirty_pages(struct btrfs_root *root, struct inode *inode,
+ 		i_size_write(inode, end_pos);
+ 	return 0;
+ }
++EXPORT_SYMBOL(btrfs_dirty_pages);
+ 
+ /*
+  * this drops all the extents in the cache that intersect the range
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index e3aedbf..e365eee 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -89,15 +89,15 @@ static int btrfs_finish_ordered_io(struct btrfs_ordered_extent *ordered_extent);
+ static noinline int cow_file_range(struct inode *inode,
+ 				   struct page *locked_page,
+ 				   u64 start, u64 end, int *page_started,
+-				   unsigned long *nr_written, int unlock);
++				   unsigned long *nr_written, int unlock,
++				   struct page **locked_pages,
++				   int locked_page_num);
+ static struct extent_map *create_pinned_em(struct inode *inode, u64 start,
+ 					   u64 len, u64 orig_start,
+ 					   u64 block_start, u64 block_len,
+ 					   u64 orig_block_len, u64 ram_bytes,
+ 					   int type);
+ 
+-static int btrfs_dirty_inode(struct inode *inode);
+-
+ int btrfs_init_inode_security(struct btrfs_trans_handle *trans,
+ 			      struct inode *inode, struct inode *dir,
+ 			      const struct qstr *qstr)
+@@ -315,6 +315,8 @@ struct async_cow {
+ 	u64 end;
+ 	struct list_head extents;
+ 	struct btrfs_work work;
++	struct page **locked_pages;
++	int locked_page_num;
+ };
+ 
+ static noinline int add_async_extent(struct async_cow *cow,
+@@ -376,7 +378,9 @@ static noinline void compress_file_range(struct inode *inode,
+ 					struct page *locked_page,
+ 					u64 start, u64 end,
+ 					struct async_cow *async_cow,
+-					int *num_added)
++					int *num_added,
++					struct page **locked_pages,
++					int locked_page_num)
+ {
+ 	struct btrfs_root *root = BTRFS_I(inode)->root;
+ 	u64 num_bytes;
+@@ -532,7 +536,8 @@ cont:
+ 						     PAGE_CLEAR_DIRTY |
+ 						     PAGE_SET_WRITEBACK |
+ 						     page_error_op |
+-						     PAGE_END_WRITEBACK);
++						     PAGE_END_WRITEBACK,
++						     locked_pages, locked_page_num);
+ 			goto free_pages_out;
+ 		}
+ 	}
+@@ -681,7 +686,9 @@ retry:
+ 					     async_extent->start,
+ 					     async_extent->start +
+ 					     async_extent->ram_size - 1,
+-					     &page_started, &nr_written, 0);
++					     &page_started, &nr_written, 0,
++					     async_cow->locked_pages,
++					     async_cow->locked_page_num);
+ 
+ 			/* JDM XXX */
+ 
+@@ -803,7 +810,9 @@ retry:
+ 				async_extent->ram_size - 1,
+ 				NULL, EXTENT_LOCKED | EXTENT_DELALLOC,
+ 				PAGE_UNLOCK | PAGE_CLEAR_DIRTY |
+-				PAGE_SET_WRITEBACK);
++				PAGE_SET_WRITEBACK,
++				async_cow->locked_pages,
++				async_cow->locked_page_num);
+ 		ret = btrfs_submit_compressed_write(inode,
+ 				    async_extent->start,
+ 				    async_extent->ram_size,
+@@ -822,7 +831,9 @@ retry:
+ 			p->mapping = NULL;
+ 			extent_clear_unlock_delalloc(inode, start, end, NULL, 0,
+ 						     PAGE_END_WRITEBACK |
+-						     PAGE_SET_ERROR);
++						     PAGE_SET_ERROR,
++						     async_cow->locked_pages,
++						     async_cow->locked_page_num);
+ 			free_async_extent_pages(async_extent);
+ 		}
+ 		alloc_hint = ins.objectid + ins.offset;
+@@ -840,7 +851,9 @@ out_free:
+ 				     EXTENT_DEFRAG | EXTENT_DO_ACCOUNTING,
+ 				     PAGE_UNLOCK | PAGE_CLEAR_DIRTY |
+ 				     PAGE_SET_WRITEBACK | PAGE_END_WRITEBACK |
+-				     PAGE_SET_ERROR);
++				     PAGE_SET_ERROR,
++				     async_cow->locked_pages,
++				     async_cow->locked_page_num);
+ 	free_async_extent_pages(async_extent);
+ 	kfree(async_extent);
+ 	goto again;
+@@ -895,7 +908,9 @@ static noinline int cow_file_range(struct inode *inode,
+ 				   struct page *locked_page,
+ 				   u64 start, u64 end, int *page_started,
+ 				   unsigned long *nr_written,
+-				   int unlock)
++				   int unlock,
++				   struct page **locked_pages,
++				   int locked_page_num)
+ {
+ 	struct btrfs_root *root = BTRFS_I(inode)->root;
+ 	u64 alloc_hint = 0;
+@@ -933,7 +948,8 @@ static noinline int cow_file_range(struct inode *inode,
+ 				     EXTENT_LOCKED | EXTENT_DELALLOC |
+ 				     EXTENT_DEFRAG, PAGE_UNLOCK |
+ 				     PAGE_CLEAR_DIRTY | PAGE_SET_WRITEBACK |
+-				     PAGE_END_WRITEBACK);
++				     PAGE_END_WRITEBACK,
++				     locked_pages, locked_page_num);
+ 
+ 			*nr_written = *nr_written +
+ 			     (end - start + PAGE_CACHE_SIZE) / PAGE_CACHE_SIZE;
+@@ -1024,7 +1040,8 @@ static noinline int cow_file_range(struct inode *inode,
+ 		extent_clear_unlock_delalloc(inode, start,
+ 					     start + ram_size - 1, locked_page,
+ 					     EXTENT_LOCKED | EXTENT_DELALLOC,
+-					     op);
++					     op, locked_pages,
++					     locked_page_num);
+ 		disk_num_bytes -= cur_alloc_size;
+ 		num_bytes -= cur_alloc_size;
+ 		alloc_hint = ins.objectid + ins.offset;
+@@ -1042,7 +1059,8 @@ out_unlock:
+ 				     EXTENT_LOCKED | EXTENT_DO_ACCOUNTING |
+ 				     EXTENT_DELALLOC | EXTENT_DEFRAG,
+ 				     PAGE_UNLOCK | PAGE_CLEAR_DIRTY |
+-				     PAGE_SET_WRITEBACK | PAGE_END_WRITEBACK);
++				     PAGE_SET_WRITEBACK | PAGE_END_WRITEBACK,
++				     locked_pages, locked_page_num);
+ 	goto out;
+ }
+ 
+@@ -1057,7 +1075,8 @@ static noinline void async_cow_start(struct btrfs_work *work)
+ 
+ 	compress_file_range(async_cow->inode, async_cow->locked_page,
+ 			    async_cow->start, async_cow->end, async_cow,
+-			    &num_added);
++			    &num_added, async_cow->locked_pages,
++			    async_cow->locked_page_num);
+ 	if (num_added == 0) {
+ 		btrfs_add_delayed_iput(async_cow->inode);
+ 		async_cow->inode = NULL;
+@@ -1099,7 +1118,9 @@ static noinline void async_cow_free(struct btrfs_work *work)
+ 
+ static int cow_file_range_async(struct inode *inode, struct page *locked_page,
+ 				u64 start, u64 end, int *page_started,
+-				unsigned long *nr_written)
++				unsigned long *nr_written,
++				struct page **locked_pages,
++				int locked_page_num)
+ {
+ 	struct async_cow *async_cow;
+ 	struct btrfs_root *root = BTRFS_I(inode)->root;
+@@ -1116,6 +1137,8 @@ static int cow_file_range_async(struct inode *inode, struct page *locked_page,
+ 		async_cow->root = root;
+ 		async_cow->locked_page = locked_page;
+ 		async_cow->start = start;
++		async_cow->locked_pages = locked_pages;
++		async_cow->locked_page_num = locked_page_num;
+ 
+ 		if (BTRFS_I(inode)->flags & BTRFS_INODE_NOCOMPRESS &&
+ 		    !btrfs_test_opt(root, FORCE_COMPRESS))
+@@ -1187,8 +1210,10 @@ static noinline int csum_exist_in_range(struct btrfs_root *root,
+  */
+ static noinline int run_delalloc_nocow(struct inode *inode,
+ 				       struct page *locked_page,
+-			      u64 start, u64 end, int *page_started, int force,
+-			      unsigned long *nr_written)
++				       u64 start, u64 end, int *page_started,
++				       int force, unsigned long *nr_written,
++				       struct page **locked_pages,
++				       int locked_page_num)
+ {
+ 	struct btrfs_root *root = BTRFS_I(inode)->root;
+ 	struct btrfs_trans_handle *trans;
+@@ -1220,7 +1245,8 @@ static noinline int run_delalloc_nocow(struct inode *inode,
+ 					     EXTENT_DEFRAG, PAGE_UNLOCK |
+ 					     PAGE_CLEAR_DIRTY |
+ 					     PAGE_SET_WRITEBACK |
+-					     PAGE_END_WRITEBACK);
++					     PAGE_END_WRITEBACK,
++					     locked_pages, locked_page_num);
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -1238,7 +1264,8 @@ static noinline int run_delalloc_nocow(struct inode *inode,
+ 					     EXTENT_DEFRAG, PAGE_UNLOCK |
+ 					     PAGE_CLEAR_DIRTY |
+ 					     PAGE_SET_WRITEBACK |
+-					     PAGE_END_WRITEBACK);
++					     PAGE_END_WRITEBACK,
++					     locked_pages, locked_page_num);
+ 		btrfs_free_path(path);
+ 		return PTR_ERR(trans);
+ 	}
+@@ -1368,7 +1395,8 @@ out_check:
+ 		if (cow_start != (u64)-1) {
+ 			ret = cow_file_range(inode, locked_page,
+ 					     cow_start, found_key.offset - 1,
+-					     page_started, nr_written, 1);
++					     page_started, nr_written, 1,
++					     locked_pages, locked_page_num);
+ 			if (ret) {
+ 				if (!nolock && nocow)
+ 					btrfs_end_write_no_snapshoting(root);
+@@ -1431,7 +1459,8 @@ out_check:
+ 					     cur_offset + num_bytes - 1,
+ 					     locked_page, EXTENT_LOCKED |
+ 					     EXTENT_DELALLOC, PAGE_UNLOCK |
+-					     PAGE_SET_PRIVATE2);
++					     PAGE_SET_PRIVATE2,
++					     locked_pages, locked_page_num);
+ 		if (!nolock && nocow)
+ 			btrfs_end_write_no_snapshoting(root);
+ 		cur_offset = extent_end;
+@@ -1447,7 +1476,8 @@ out_check:
+ 
+ 	if (cow_start != (u64)-1) {
+ 		ret = cow_file_range(inode, locked_page, cow_start, end,
+-				     page_started, nr_written, 1);
++				     page_started, nr_written, 1,
++				     NULL, 0);
+ 		if (ret)
+ 			goto error;
+ 	}
+@@ -1464,7 +1494,8 @@ error:
+ 					     EXTENT_DO_ACCOUNTING, PAGE_UNLOCK |
+ 					     PAGE_CLEAR_DIRTY |
+ 					     PAGE_SET_WRITEBACK |
+-					     PAGE_END_WRITEBACK);
++					     PAGE_END_WRITEBACK,
++					     locked_pages, locked_page_num);
+ 	btrfs_free_path(path);
+ 	return ret;
+ }
+@@ -1494,25 +1525,32 @@ static inline int need_force_cow(struct inode *inode, u64 start, u64 end)
+  */
+ static int run_delalloc_range(struct inode *inode, struct page *locked_page,
+ 			      u64 start, u64 end, int *page_started,
+-			      unsigned long *nr_written)
++			      unsigned long *nr_written,
++			      struct page **locked_pages, int locked_page_num)
+ {
+ 	int ret;
+ 	int force_cow = need_force_cow(inode, start, end);
+ 
+ 	if (BTRFS_I(inode)->flags & BTRFS_INODE_NODATACOW && !force_cow) {
+ 		ret = run_delalloc_nocow(inode, locked_page, start, end,
+-					 page_started, 1, nr_written);
++					 page_started, 1, nr_written,
++					 locked_pages, locked_page_num);
+ 	} else if (BTRFS_I(inode)->flags & BTRFS_INODE_PREALLOC && !force_cow) {
+ 		ret = run_delalloc_nocow(inode, locked_page, start, end,
+-					 page_started, 0, nr_written);
++					 page_started, 0, nr_written,
++					 locked_pages, locked_page_num);
+ 	} else if (!inode_need_compress(inode)) {
+ 		ret = cow_file_range(inode, locked_page, start, end,
+-				      page_started, nr_written, 1);
++				      page_started, nr_written, 1,
++				      locked_pages, locked_page_num);
+ 	} else {
+ 		set_bit(BTRFS_INODE_HAS_ASYNC_EXTENT,
+ 			&BTRFS_I(inode)->runtime_flags);
++		/* LIXI TODO: fix async unlock */
++		BUG_ON(locked_page_num);
+ 		ret = cow_file_range_async(inode, locked_page, start, end,
+-					   page_started, nr_written);
++					   page_started, nr_written,
++					   locked_pages, locked_page_num);
+ 	}
+ 	return ret;
+ }
+@@ -3741,6 +3779,8 @@ noinline int btrfs_update_inode(struct btrfs_trans_handle *trans,
+ 
+ 	return btrfs_update_inode_item(trans, root, inode);
+ }
++EXPORT_SYMBOL(btrfs_update_inode);
++
+ 
+ noinline int btrfs_update_inode_fallback(struct btrfs_trans_handle *trans,
+ 					 struct btrfs_root *root,
+@@ -3871,6 +3911,7 @@ int btrfs_unlink_inode(struct btrfs_trans_handle *trans,
+ 	}
+ 	return ret;
+ }
++EXPORT_SYMBOL(btrfs_unlink_inode);
+ 
+ /*
+  * helper to start transaction for unlink and rmdir.
+@@ -5305,6 +5346,7 @@ struct inode *btrfs_lookup_dentry(struct inode *dir, struct dentry *dentry)
+ 
+ 	return inode;
+ }
++EXPORT_SYMBOL(btrfs_lookup_dentry);
+ 
+ static int btrfs_dentry_delete(const struct dentry *dentry)
+ {
+@@ -5580,7 +5622,7 @@ int btrfs_write_inode(struct inode *inode, struct writeback_control *wbc)
+  * FIXME, needs more benchmarking...there are no reasons other than performance
+  * to keep or drop this code.
+  */
+-static int btrfs_dirty_inode(struct inode *inode)
++int btrfs_dirty_inode(struct inode *inode)
+ {
+ 	struct btrfs_root *root = BTRFS_I(inode)->root;
+ 	struct btrfs_trans_handle *trans;
+@@ -5609,6 +5651,7 @@ static int btrfs_dirty_inode(struct inode *inode)
+ 
+ 	return ret;
+ }
++EXPORT_SYMBOL(btrfs_dirty_inode);
+ 
+ /*
+  * This is a copy of file_update_time.  We need this so we can return error on
+@@ -5738,6 +5781,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+ 	struct btrfs_inode_ref *ref;
+ 	struct btrfs_key key[2];
+ 	u32 sizes[2];
++	int nitems = name ? 2 : 1;
+ 	unsigned long ptr;
+ 	int ret;
+ 
+@@ -5757,7 +5801,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+ 	 */
+ 	inode->i_ino = objectid;
+ 
+-	if (dir) {
++	if (dir && name) {
+ 		trace_btrfs_inode_request(dir);
+ 
+ 		ret = btrfs_set_inode_index(dir, index);
+@@ -5766,6 +5810,8 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+ 			iput(inode);
+ 			return ERR_PTR(ret);
+ 		}
++	} else if (dir) {
++		*index = 0;
+ 	}
+ 	/*
+ 	 * index_cnt is ignored for everything but a dir,
+@@ -5790,18 +5836,21 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+ 	key[0].type = BTRFS_INODE_ITEM_KEY;
+ 	key[0].offset = 0;
+ 
+-	/*
+-	 * Start new inodes with an inode_ref. This is slightly more
+-	 * efficient for small numbers of hard links since they will
+-	 * be packed into one item. Extended refs will kick in if we
+-	 * add more hard links than can fit in the ref item.
+-	 */
+-	key[1].objectid = objectid;
+-	key[1].type = BTRFS_INODE_REF_KEY;
+-	key[1].offset = ref_objectid;
+-
+ 	sizes[0] = sizeof(struct btrfs_inode_item);
+-	sizes[1] = name_len + sizeof(*ref);
++
++	if (name) {
++		/*
++		 * Start new inodes with an inode_ref. This is slightly more
++		 * efficient for small numbers of hard links since they will
++		 * be packed into one item. Extended refs will kick in if we
++		 * add more hard links than can fit in the ref item.
++		 */
++		key[1].objectid = objectid;
++		key[1].type = BTRFS_INODE_REF_KEY;
++		key[1].offset = ref_objectid;
++
++		sizes[1] = name_len + sizeof(*ref);
++	}
+ 
+ 	location = &BTRFS_I(inode)->location;
+ 	location->objectid = objectid;
+@@ -5813,7 +5862,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+ 		goto fail;
+ 
+ 	path->leave_spinning = 1;
+-	ret = btrfs_insert_empty_items(trans, root, path, key, sizes, 2);
++	ret = btrfs_insert_empty_items(trans, root, path, key, sizes, nitems);
+ 	if (ret != 0)
+ 		goto fail_unlock;
+ 
+@@ -5826,12 +5875,14 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+ 			     sizeof(*inode_item));
+ 	fill_inode_item(trans, path->nodes[0], inode_item, inode);
+ 
+-	ref = btrfs_item_ptr(path->nodes[0], path->slots[0] + 1,
+-			     struct btrfs_inode_ref);
+-	btrfs_set_inode_ref_name_len(path->nodes[0], ref, name_len);
+-	btrfs_set_inode_ref_index(path->nodes[0], ref, *index);
+-	ptr = (unsigned long)(ref + 1);
+-	write_extent_buffer(path->nodes[0], name, ptr, name_len);
++	if (name) {
++		ref = btrfs_item_ptr(path->nodes[0], path->slots[0] + 1,
++				     struct btrfs_inode_ref);
++		btrfs_set_inode_ref_name_len(path->nodes[0], ref, name_len);
++		btrfs_set_inode_ref_index(path->nodes[0], ref, *index);
++		ptr = (unsigned long)(ref + 1);
++		write_extent_buffer(path->nodes[0], name, ptr, name_len);
++	}
+ 
+ 	btrfs_mark_buffer_dirty(path->nodes[0]);
+ 	btrfs_free_path(path);
+@@ -9416,6 +9467,328 @@ static int btrfs_permission(struct inode *inode, int mask)
+ 	return generic_permission(inode, mask);
+ }
+ 
++struct inode *btrfs_create_inode(struct btrfs_trans_handle *trans,
++				 struct inode *dir, umode_t mode,
++				 dev_t rdev,
++				 u64 *index)
++{
++	struct btrfs_root *root = BTRFS_I(dir)->root;
++	struct inode *inode;
++	u64 objectid;
++	int err;
++
++	err = btrfs_find_free_ino(root, &objectid);
++	if (err)
++		return ERR_PTR(err);
++
++	inode = btrfs_new_inode(trans, root, dir, NULL,
++				0, btrfs_ino(dir), objectid,
++				mode, index);
++	if (IS_ERR(inode))
++		return inode;
++
++	btrfs_i_size_write(inode, 0);
++
++	err = btrfs_update_inode(trans, root, inode);
++	if (err)
++		goto out_drop;
++
++	switch (mode & S_IFMT) {
++	case S_IFREG:
++		inode->i_fop = &btrfs_file_operations;
++		inode->i_op = &btrfs_file_inode_operations;
++		inode->i_mapping->a_ops = &btrfs_aops;
++		inode->i_mapping->backing_dev_info = &root->fs_info->bdi;
++		BTRFS_I(inode)->io_tree.ops = &btrfs_extent_io_ops;
++		break;
++	case S_IFDIR:
++		inode->i_fop = &btrfs_dir_file_operations;
++		inode->i_op = &btrfs_dir_inode_operations.ops;
++		break;
++	case S_IFLNK:
++		inode->i_fop = &btrfs_file_operations;
++		inode->i_op = &btrfs_symlink_inode_operations;
++		inode->i_mapping->a_ops = &btrfs_symlink_aops;
++		inode->i_mapping->backing_dev_info = &root->fs_info->bdi;
++		BTRFS_I(inode)->io_tree.ops = &btrfs_extent_io_ops;
++		break;
++	case S_IFBLK:
++	case S_IFCHR:
++	case S_IFIFO:
++	case S_IFSOCK:
++		inode->i_op = &btrfs_special_inode_operations;
++
++		init_special_inode(inode, inode->i_mode, rdev);
++		break;
++	default:
++		err = -EINVAL;
++		goto out_drop;
++		break;
++	}
++	return inode;
++out_drop:
++	inode_dec_link_count(inode);
++	iput(inode);
++	return ERR_PTR(err);
++}
++EXPORT_SYMBOL(btrfs_create_inode);
++
++static int __btrfs_add_entry(struct btrfs_trans_handle *trans,
++			     struct inode *dir,
++			     struct inode *inode,
++			     const char *name, int name_len,
++			     u64 *index)
++{
++	int ret;
++	struct btrfs_root *root = BTRFS_I(dir)->root;
++	struct btrfs_path *path;
++	struct btrfs_inode_ref *ref;
++	struct btrfs_key key;
++	u64 objectid = BTRFS_I(inode)->location.objectid;
++	u64 ref_objectid = btrfs_ino(dir);
++	u32 size;
++	unsigned long ptr;
++
++	path = btrfs_alloc_path();
++	if (!path)
++		return -ENOMEM;
++
++	trace_btrfs_inode_request(dir);
++	ret = btrfs_set_inode_index(dir, index);
++	if (ret) {
++		btrfs_free_path(path);
++		return ret;
++	}
++
++#ifdef LIXI
++	/* Need this for master branch of btrfs */
++	BTRFS_I(inode)->dir_index = *index;
++#endif /* LIXI */
++
++	/*
++	 * Start new inodes with an inode_ref. This is slightly more
++	 * efficient for small numbers of hard links since they will
++	 * be packed into one item. Extended refs will kick in if we
++	 * add more hard links than can fit in the ref item.
++	 */
++	key.objectid = objectid;
++	btrfs_set_key_type(&key, BTRFS_INODE_REF_KEY);
++	key.offset = ref_objectid;
++	size = name_len + sizeof(*ref);
++
++	path->leave_spinning = 1;
++	ret = btrfs_insert_empty_items(trans, root, path, &key, &size, 1);
++	if (ret != 0)
++		goto fail;
++
++	ref = btrfs_item_ptr(path->nodes[0], path->slots[0],
++			     struct btrfs_inode_ref);
++	btrfs_set_inode_ref_name_len(path->nodes[0], ref, name_len);
++	btrfs_set_inode_ref_index(path->nodes[0], ref, *index);
++	ptr = (unsigned long)(ref + 1);
++	write_extent_buffer(path->nodes[0], name, ptr, name_len);
++
++	btrfs_mark_buffer_dirty(path->nodes[0]);
++	btrfs_free_path(path);
++
++	return 0;
++fail:
++	BTRFS_I(dir)->index_cnt--;
++	btrfs_free_path(path);
++	return ret;
++}
++
++int btrfs_add_entry(struct btrfs_trans_handle *trans,
++		    struct inode *dir,
++		    struct inode *inode,
++		    struct qstr *d_name,
++		    u64 *index)
++{
++	int err;
++	struct btrfs_root *root = BTRFS_I(dir)->root;
++
++	err = __btrfs_add_entry(trans, dir, inode,
++				d_name->name, d_name->len,
++				index);
++	if (err)
++		return err;
++
++	err = btrfs_init_inode_security(trans, inode, dir, d_name);
++	if (err)
++		return err;
++
++	err = btrfs_add_link(trans, dir, inode, d_name->name,
++			     d_name->len, 0, *index);
++	if (err)
++		return err;
++
++	err = btrfs_update_inode(trans, root, inode);
++	if (err)
++		return err;
++
++	btrfs_balance_delayed_items(root);
++	btrfs_btree_balance_dirty(root);
++	return 0;
++}
++EXPORT_SYMBOL(btrfs_add_entry);
++
++static int _btrfs_punch(struct inode *inode, struct btrfs_trans_handle *trans)
++{
++	struct btrfs_root *root = BTRFS_I(inode)->root;
++	struct btrfs_block_rsv *rsv;
++	int ret = 0;
++	u64 mask = root->sectorsize - 1;
++	u64 min_size = btrfs_calc_trunc_metadata_size(root, 1);
++
++	ret = btrfs_wait_ordered_range(inode, inode->i_size & (~mask),
++				       (u64)-1);
++	if (ret)
++		return ret;
++
++	/*
++	 * Yes ladies and gentelment, this is indeed ugly.  The fact is we have
++	 * 3 things going on here
++	 *
++	 * 1) We need to reserve space for our orphan item and the space to
++	 * delete our orphan item.  Lord knows we don't want to have a dangling
++	 * orphan item because we didn't reserve space to remove it.
++	 *
++	 * 2) We need to reserve space to update our inode.
++	 *
++	 * 3) We need to have something to cache all the space that is going to
++	 * be free'd up by the truncate operation, but also have some slack
++	 * space reserved in case it uses space during the truncate (thank you
++	 * very much snapshotting).
++	 *
++	 * And we need these to all be seperate.  The fact is we can use alot of
++	 * space doing the truncate, and we have no earthly idea how much space
++	 * we will use, so we need the truncate reservation to be seperate so it
++	 * doesn't end up using space reserved for updating the inode or
++	 * removing the orphan item.  We also need to be able to stop the
++	 * transaction and start a new one, which means we need to be able to
++	 * update the inode several times, and we have no idea of knowing how
++	 * many times that will be, so we can't just reserve 1 item for the
++	 * entirety of the opration, so that has to be done seperately as well.
++	 * Then there is the orphan item, which does indeed need to be held on
++	 * to for the whole operation, and we need nobody to touch this reserved
++	 * space except the orphan code.
++	 *
++	 * So that leaves us with
++	 *
++	 * 1) root->orphan_block_rsv - for the orphan deletion.
++	 * 2) rsv - for the truncate reservation, which we will steal from the
++	 * transaction reservation.
++	 * 3) fs_info->trans_block_rsv - this will have 1 items worth left for
++	 * updating the inode.
++	 */
++	rsv = btrfs_alloc_block_rsv(root, BTRFS_BLOCK_RSV_TEMP);
++	if (!rsv)
++		return -ENOMEM;
++	rsv->size = min_size;
++	rsv->failfast = 1;
++
++	/* Migrate the slack space for the truncate to our reserve */
++	ret = btrfs_block_rsv_migrate(&root->fs_info->trans_block_rsv, rsv,
++				      min_size);
++	BUG_ON(ret);
++
++	/*
++	 * So if we truncate and then write and fsync we normally would just
++	 * write the extents that changed, which is a problem if we need to
++	 * first truncate that entire inode.  So set this flag so we write out
++	 * all of the extents in the inode to the sync log so we're completely
++	 * safe.
++	 */
++	set_bit(BTRFS_INODE_NEEDS_FULL_SYNC, &BTRFS_I(inode)->runtime_flags);
++	trans->block_rsv = rsv;
++
++	while (1) {
++		ret = btrfs_truncate_inode_items(trans, root, inode,
++						 inode->i_size,
++						 BTRFS_EXTENT_DATA_KEY);
++		if (ret != -ENOSPC) {
++			break;
++		}
++
++		trans->block_rsv = &root->fs_info->trans_block_rsv;
++		ret = btrfs_update_inode(trans, root, inode);
++		if (ret) {
++			break;
++		}
++
++		btrfs_btree_balance_dirty(root);
++
++		ret = btrfs_block_rsv_migrate(&root->fs_info->trans_block_rsv,
++					      rsv, min_size);
++		BUG_ON(ret);	/* shouldn't happen */
++		trans->block_rsv = rsv;
++	}
++
++	if (ret == 0 && inode->i_nlink > 0) {
++		trans->block_rsv = root->orphan_block_rsv;
++		btrfs_orphan_del(trans, inode);
++	}
++
++	trans->block_rsv = &root->fs_info->trans_block_rsv;
++	ret = btrfs_update_inode(trans, root, inode);
++
++	btrfs_btree_balance_dirty(root);
++
++	btrfs_free_block_rsv(root, rsv);
++
++	return ret;
++}
++
++int btrfs_punch(struct inode *inode, struct btrfs_trans_handle *trans,
++		__u64 start, __u64 end)
++{
++	int ret;
++
++	BUG_ON(end != 0xffffffffffffffffULL);
++
++	/*
++	 * We're truncating a file that used to have good data down to
++	 * zero. Make sure it gets into the ordered flush list so that
++	 * any new writes get down to disk quickly.
++	 */
++	if (start == 0)
++		set_bit(BTRFS_INODE_ORDERED_DATA_CLOSE,
++			&BTRFS_I(inode)->runtime_flags);
++
++	/*
++	 * We need to do this in case we fail at _any_ point during the
++	 * actual truncate.  Once we do the truncate_setsize we could
++	 * invalidate pages which forces any outstanding ordered io to
++	 * be instantly completed which will give us extents that need
++	 * to be truncated.  If we fail to get an orphan inode down we
++	 * could have left over extents that were never meant to live,
++	 * so we need to garuntee from this point on that everything
++	 * will be consistent.
++	 */
++	ret = btrfs_orphan_add(trans, inode);
++
++	/* we don't support swapfiles, so vmtruncate shouldn't fail */
++	truncate_setsize(inode, start);
++	/* Disable nonlocked read DIO to avoid the end less truncate */
++	btrfs_inode_block_unlocked_dio(inode);
++	inode_dio_wait(inode);
++	btrfs_inode_resume_unlocked_dio(inode);
++
++	ret = _btrfs_punch(inode, trans);
++	if (ret && inode->i_nlink) {
++		/*
++		 * failed to truncate, disk_i_size is only adjusted down
++		 * as we remove extents, so it should represent the true
++		 * size of the inode, so reset the in memory size and
++		 * delete our orphan entry.
++		 */
++		i_size_write(inode, BTRFS_I(inode)->disk_i_size);
++		ret = btrfs_orphan_del(trans, inode);
++	}
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_punch);
++
+ /* Inspired by filemap_check_errors() */
+ int btrfs_inode_check_errors(struct inode *inode)
+ {
+diff --git a/fs/btrfs/xattr.c b/fs/btrfs/xattr.c
+index 39eabff..f55700c 100644
+--- a/fs/btrfs/xattr.c
++++ b/fs/btrfs/xattr.c
+@@ -252,6 +252,7 @@ out:
+ 	btrfs_end_transaction(trans, root);
+ 	return ret;
+ }
++EXPORT_SYMBOL(__btrfs_setxattr);
+ 
+ ssize_t btrfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
+ {
+-- 
+1.8.3.1
+
