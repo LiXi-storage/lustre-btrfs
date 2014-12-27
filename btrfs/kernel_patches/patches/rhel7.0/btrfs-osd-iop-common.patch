@@ -1,0 +1,320 @@
+Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
+===================================================================
+--- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/btrfs_inode.h
++++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
+@@ -320,4 +320,13 @@ void btrfs_add_transaction_callback(stru
+ 				    struct btrfs_trans_cb_entry *callback);
+ bool btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
+ 					struct btrfs_trans_cb_entry *callback);
++int btrfs_dirty_inode(struct inode *inode);
++struct inode *btrfs_create_inode(struct btrfs_trans_handle *trans,
++				 struct inode *dir, umode_t mode,
++				 dev_t rdev, u64 *index);
++int btrfs_add_entry(struct btrfs_trans_handle *trans,
++		    struct inode *dir,
++		    struct inode *inode,
++		    struct qstr *d_name,
++		    u64 *index);
+ #endif
+Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/inode.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/inode.c
++++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/inode.c
+@@ -95,8 +95,6 @@ static struct extent_map *create_pinned_
+ 					   u64 orig_block_len, u64 ram_bytes,
+ 					   int type);
+ 
+-static int btrfs_dirty_inode(struct inode *inode);
+-
+ int btrfs_init_inode_security(struct btrfs_trans_handle *trans,
+ 			      struct inode *inode, struct inode *dir,
+ 			      const struct qstr *qstr)
+@@ -3639,6 +3637,7 @@ int btrfs_unlink_inode(struct btrfs_tran
+ 	}
+ 	return ret;
+ }
++EXPORT_SYMBOL(btrfs_unlink_inode);
+ 
+ /*
+  * helper to start transaction for unlink and rmdir.
+@@ -4942,6 +4941,7 @@ struct inode *btrfs_lookup_dentry(struct
+ 
+ 	return inode;
+ }
++EXPORT_SYMBOL(btrfs_lookup_dentry);
+ 
+ static int btrfs_dentry_delete(const struct dentry *dentry)
+ {
+@@ -5211,7 +5211,7 @@ int btrfs_write_inode(struct inode *inod
+  * FIXME, needs more benchmarking...there are no reasons other than performance
+  * to keep or drop this code.
+  */
+-static int btrfs_dirty_inode(struct inode *inode)
++int btrfs_dirty_inode(struct inode *inode)
+ {
+ 	struct btrfs_root *root = BTRFS_I(inode)->root;
+ 	struct btrfs_trans_handle *trans;
+@@ -5240,6 +5240,7 @@ static int btrfs_dirty_inode(struct inod
+ 
+ 	return ret;
+ }
++EXPORT_SYMBOL(btrfs_dirty_inode);
+ 
+ /*
+  * This is a copy of file_update_time.  We need this so we can return error on
+@@ -5358,6 +5359,7 @@ struct inode *btrfs_new_inode(struct btr
+ 	struct btrfs_inode_ref *ref;
+ 	struct btrfs_key key[2];
+ 	u32 sizes[2];
++	int nitems = name ? 2 : 1;
+ 	unsigned long ptr;
+ 	int ret;
+ 	int owner;
+@@ -5378,7 +5380,7 @@ struct inode *btrfs_new_inode(struct btr
+ 	 */
+ 	inode->i_ino = objectid;
+ 
+-	if (dir) {
++	if (dir && name) {
+ 		trace_btrfs_inode_request(dir);
+ 
+ 		ret = btrfs_set_inode_index(dir, index);
+@@ -5387,6 +5389,8 @@ struct inode *btrfs_new_inode(struct btr
+ 			iput(inode);
+ 			return ERR_PTR(ret);
+ 		}
++	} else if (dir) {
++		*index = 0;
+ 	}
+ 	/*
+ 	 * index_cnt is ignored for everything but a dir,
+@@ -5415,21 +5419,24 @@ struct inode *btrfs_new_inode(struct btr
+ 	btrfs_set_key_type(&key[0], BTRFS_INODE_ITEM_KEY);
+ 	key[0].offset = 0;
+ 
+-	/*
+-	 * Start new inodes with an inode_ref. This is slightly more
+-	 * efficient for small numbers of hard links since they will
+-	 * be packed into one item. Extended refs will kick in if we
+-	 * add more hard links than can fit in the ref item.
+-	 */
+-	key[1].objectid = objectid;
+-	btrfs_set_key_type(&key[1], BTRFS_INODE_REF_KEY);
+-	key[1].offset = ref_objectid;
+-
+ 	sizes[0] = sizeof(struct btrfs_inode_item);
+-	sizes[1] = name_len + sizeof(*ref);
++
++	if (name) {
++		/*
++		 * Start new inodes with an inode_ref. This is slightly more
++		 * efficient for small numbers of hard links since they will
++		 * be packed into one item. Extended refs will kick in if we
++		 * add more hard links than can fit in the ref item.
++		 */
++		key[1].objectid = objectid;
++		btrfs_set_key_type(&key[1], BTRFS_INODE_REF_KEY);
++		key[1].offset = ref_objectid;
++
++		sizes[1] = name_len + sizeof(*ref);
++	}
+ 
+ 	path->leave_spinning = 1;
+-	ret = btrfs_insert_empty_items(trans, root, path, key, sizes, 2);
++	ret = btrfs_insert_empty_items(trans, root, path, key, sizes, nitems);
+ 	if (ret != 0)
+ 		goto fail;
+ 
+@@ -5442,12 +5449,14 @@ struct inode *btrfs_new_inode(struct btr
+ 			     sizeof(*inode_item));
+ 	fill_inode_item(trans, path->nodes[0], inode_item, inode);
+ 
+-	ref = btrfs_item_ptr(path->nodes[0], path->slots[0] + 1,
+-			     struct btrfs_inode_ref);
+-	btrfs_set_inode_ref_name_len(path->nodes[0], ref, name_len);
+-	btrfs_set_inode_ref_index(path->nodes[0], ref, *index);
+-	ptr = (unsigned long)(ref + 1);
+-	write_extent_buffer(path->nodes[0], name, ptr, name_len);
++	if (name) {
++		ref = btrfs_item_ptr(path->nodes[0], path->slots[0] + 1,
++				     struct btrfs_inode_ref);
++		btrfs_set_inode_ref_name_len(path->nodes[0], ref, name_len);
++		btrfs_set_inode_ref_index(path->nodes[0], ref, *index);
++		ptr = (unsigned long)(ref + 1);
++		write_extent_buffer(path->nodes[0], name, ptr, name_len);
++	}
+ 
+ 	btrfs_mark_buffer_dirty(path->nodes[0]);
+ 	btrfs_free_path(path);
+@@ -8639,6 +8648,171 @@ static int btrfs_permission(struct inode
+ 	return generic_permission(inode, mask);
+ }
+ 
++struct inode *btrfs_create_inode(struct btrfs_trans_handle *trans,
++				 struct inode *dir, umode_t mode,
++				 dev_t rdev,
++				 u64 *index)
++{
++	struct btrfs_root *root = BTRFS_I(dir)->root;
++	struct inode *inode;
++	u64 objectid;
++	int err;
++
++	err = btrfs_find_free_ino(root, &objectid);
++	if (err)
++		return ERR_PTR(err);
++
++	inode = btrfs_new_inode(trans, root, dir, NULL,
++				0, btrfs_ino(dir), objectid,
++				mode, index);
++	if (IS_ERR(inode))
++		return inode;
++
++	btrfs_i_size_write(inode, 0);
++
++	err = btrfs_update_inode(trans, root, inode);
++	if (err)
++		goto out_drop;
++
++	switch (mode & S_IFMT) {
++	case S_IFREG:
++		inode->i_fop = &btrfs_file_operations;
++		inode->i_op = &btrfs_file_inode_operations;
++		inode->i_mapping->a_ops = &btrfs_aops;
++		inode->i_mapping->backing_dev_info = &root->fs_info->bdi;
++		BTRFS_I(inode)->io_tree.ops = &btrfs_extent_io_ops;
++		break;
++	case S_IFDIR:
++		inode->i_fop = &btrfs_dir_file_operations;
++		inode->i_op = &btrfs_dir_inode_operations;
++		break;
++	case S_IFLNK:
++		inode->i_fop = &btrfs_file_operations;
++		inode->i_op = &btrfs_symlink_inode_operations;
++		inode->i_mapping->a_ops = &btrfs_symlink_aops;
++		inode->i_mapping->backing_dev_info = &root->fs_info->bdi;
++		BTRFS_I(inode)->io_tree.ops = &btrfs_extent_io_ops;
++		break;
++	case S_IFBLK:
++	case S_IFCHR:
++	case S_IFIFO:
++	case S_IFSOCK:
++		inode->i_op = &btrfs_special_inode_operations;
++
++		init_special_inode(inode, inode->i_mode, rdev);
++		break;
++	default:
++		err = -EINVAL;
++		goto out_drop;
++		break;
++	}
++	return inode;
++out_drop:
++	inode_dec_link_count(inode);
++	iput(inode);
++	return ERR_PTR(err);
++}
++EXPORT_SYMBOL(btrfs_create_inode);
++
++static int __btrfs_add_entry(struct btrfs_trans_handle *trans,
++			     struct inode *dir,
++			     struct inode *inode,
++			     const char *name, int name_len,
++			     u64 *index)
++{
++	int ret;
++	struct btrfs_root *root = BTRFS_I(dir)->root;
++	struct btrfs_path *path;
++	struct btrfs_inode_ref *ref;
++	struct btrfs_key key;
++	u64 objectid = BTRFS_I(inode)->location.objectid;
++	u64 ref_objectid = btrfs_ino(dir);
++	u32 size;
++	unsigned long ptr;
++
++	path = btrfs_alloc_path();
++	if (!path)
++		return -ENOMEM;
++
++	trace_btrfs_inode_request(dir);
++	ret = btrfs_set_inode_index(dir, index);
++	if (ret) {
++		btrfs_free_path(path);
++		return ret;
++	}
++
++#ifdef LIXI
++	/* Need this for master branch of btrfs */
++	BTRFS_I(inode)->dir_index = *index;
++#endif /* LIXI */
++
++	/*
++	 * Start new inodes with an inode_ref. This is slightly more
++	 * efficient for small numbers of hard links since they will
++	 * be packed into one item. Extended refs will kick in if we
++	 * add more hard links than can fit in the ref item.
++	 */
++	key.objectid = objectid;
++	btrfs_set_key_type(&key, BTRFS_INODE_REF_KEY);
++	key.offset = ref_objectid;
++	size = name_len + sizeof(*ref);
++
++	path->leave_spinning = 1;
++	ret = btrfs_insert_empty_items(trans, root, path, &key, &size, 1);
++	if (ret != 0)
++		goto fail;
++
++	ref = btrfs_item_ptr(path->nodes[0], path->slots[0],
++			     struct btrfs_inode_ref);
++	btrfs_set_inode_ref_name_len(path->nodes[0], ref, name_len);
++	btrfs_set_inode_ref_index(path->nodes[0], ref, *index);
++	ptr = (unsigned long)(ref + 1);
++	write_extent_buffer(path->nodes[0], name, ptr, name_len);
++
++	btrfs_mark_buffer_dirty(path->nodes[0]);
++	btrfs_free_path(path);
++
++	return 0;
++fail:
++	BTRFS_I(dir)->index_cnt--;
++	btrfs_free_path(path);
++	return ret;
++}
++
++int btrfs_add_entry(struct btrfs_trans_handle *trans,
++		    struct inode *dir,
++		    struct inode *inode,
++		    struct qstr *d_name,
++		    u64 *index)
++{
++	int err;
++	struct btrfs_root *root = BTRFS_I(dir)->root;
++
++	err = __btrfs_add_entry(trans, dir, inode,
++				d_name->name, d_name->len,
++				index);
++	if (err)
++		return err;
++
++	err = btrfs_init_inode_security(trans, inode, dir, d_name);
++	if (err)
++		return err;
++
++	err = btrfs_add_link(trans, dir, inode, d_name->name,
++			     d_name->len, 0, *index);
++	if (err)
++		return err;
++
++	err = btrfs_update_inode(trans, root, inode);
++	if (err)
++		return err;
++
++	btrfs_balance_delayed_items(root);
++	btrfs_btree_balance_dirty(root);
++	return 0;
++}
++EXPORT_SYMBOL(btrfs_add_entry);
++
+ const struct inode_operations btrfs_dir_inode_operations = {
+ 	.getattr	= btrfs_getattr,
+ 	.lookup		= btrfs_lookup,

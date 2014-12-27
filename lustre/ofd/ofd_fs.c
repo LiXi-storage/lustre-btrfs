@@ -656,6 +656,7 @@ out:
 	return rc;
 #else /* LIXI */
 	ENTRY;
+	printk("LIXI ofd_fs_setup\n");
 	RETURN(0);
 #endif /* LIXI */
 }

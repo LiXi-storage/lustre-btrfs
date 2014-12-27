@@ -1,1 +1,5 @@
 rhel7.0/btrfs-do-not-export-ulist-functions.patch
+rhel7.0/btrfs-add-object-index-support.patch
+rhel7.0/btrfs-add-transaction-commit-callback.patch
+rhel7.0/btrfs-add-write-read-record.patch
+rhel7.0/btrfs-osd-iop-common.patch

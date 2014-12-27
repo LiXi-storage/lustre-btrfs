@@ -1,0 +1,116 @@
+Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/transaction.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/transaction.c
++++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/transaction.c
+@@ -57,6 +57,53 @@ static unsigned int btrfs_blocked_trans_
+ 					   __TRANS_JOIN_NOLOCK),
+ };
+ 
++void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
++				    void (*function)(struct btrfs_trans_cb_entry *entry,
++						     int error),
++				    struct btrfs_trans_cb_entry *callback)
++{
++	struct btrfs_transaction *cur_trans = trans->transaction;
++
++	callback->function = function;
++	spin_lock(&cur_trans->callback_lock);
++	list_add_tail(&callback->list, &cur_trans->commit_callbacks);
++	spin_unlock(&cur_trans->callback_lock);
++}
++EXPORT_SYMBOL(btrfs_add_transaction_callback);
++
++bool
++btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
++				   struct btrfs_trans_cb_entry *callback)
++{
++	bool deleted;
++	struct btrfs_transaction *cur_trans = trans->transaction;
++
++	spin_lock(&cur_trans->callback_lock);
++	deleted = !list_empty(&callback->list);
++	list_del_init(&callback->list);
++	spin_unlock(&cur_trans->callback_lock);
++
++	return deleted;
++}
++EXPORT_SYMBOL(btrfs_try_del_transaction_callback);
++
++static void btrfs_commit_transaction_callback(struct btrfs_transaction *trans)
++{
++	struct btrfs_trans_cb_entry *callback;
++
++	spin_lock(&trans->callback_lock);
++	while (!list_empty(&trans->commit_callbacks)) {
++		callback = list_entry(trans->commit_callbacks.next,
++				      struct btrfs_trans_cb_entry,
++				      list);
++		list_del_init(&callback->list);
++		spin_unlock(&trans->callback_lock);
++		callback->function(callback, trans->aborted);
++		spin_lock(&trans->callback_lock);
++	}
++	spin_unlock(&trans->callback_lock);
++}
++
+ void btrfs_put_transaction(struct btrfs_transaction *transaction)
+ {
+ 	WARN_ON(atomic_read(&transaction->use_count) == 0);
+@@ -71,6 +118,7 @@ void btrfs_put_transaction(struct btrfs_
+ 			list_del_init(&em->list);
+ 			free_extent_map(em);
+ 		}
++		btrfs_commit_transaction_callback(transaction);
+ 		kmem_cache_free(btrfs_transaction_cachep, transaction);
+ 	}
+ }
+@@ -211,6 +259,8 @@ loop:
+ 	INIT_LIST_HEAD(&cur_trans->pending_snapshots);
+ 	INIT_LIST_HEAD(&cur_trans->ordered_operations);
+ 	INIT_LIST_HEAD(&cur_trans->pending_chunks);
++	INIT_LIST_HEAD(&cur_trans->commit_callbacks);
++	spin_lock_init(&cur_trans->callback_lock);
+ 	list_add_tail(&cur_trans->list, &fs_info->trans_list);
+ 	extent_io_tree_init(&cur_trans->dirty_pages,
+ 			     fs_info->btree_inode->i_mapping);
+Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/transaction.h
+===================================================================
+--- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/transaction.h
++++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/transaction.h
+@@ -57,6 +57,9 @@ struct btrfs_transaction {
+ 	struct list_head pending_snapshots;
+ 	struct list_head ordered_operations;
+ 	struct list_head pending_chunks;
++	spinlock_t callback_lock;
++	/* protected by callback_lock */
++	struct list_head commit_callbacks;
+ 	struct btrfs_delayed_ref_root delayed_refs;
+ 	int aborted;
+ };
+Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
+===================================================================
+--- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/btrfs_inode.h
++++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
+@@ -302,4 +302,22 @@ extern const struct file_operations btrf
+ extern const struct address_space_operations btrfs_aops;
+ extern const struct address_space_operations btrfs_symlink_aops;
+ extern struct extent_io_ops btrfs_extent_io_ops;
++
++struct btrfs_trans_cb_entry {
++	/* list information for other callbacks attached to the same handle */
++	struct list_head list;
++
++	/*  Function to call with this callback structure */
++	void (*function)(struct btrfs_trans_cb_entry *entry,
++			 int error);
++
++	/* user data goes here */
++};
++
++void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
++				    void (*function)(struct btrfs_trans_cb_entry *entry,
++						     int error),
++				    struct btrfs_trans_cb_entry *callback);
++bool btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
++					struct btrfs_trans_cb_entry *callback);
+ #endif

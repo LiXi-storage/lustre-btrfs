@@ -15,7 +15,7 @@ tests_headers := $(wildcard @BTRFS_SRC_DIR@/tests/*.h)
 backfs_sources := $(filter-out %.mod.c,$(wildcard @BTRFS_SRC_DIR@/*.c))
 	tests_sources := $(filter-out %.mod.c,$(wildcard @BTRFS_SRC_DIR@/tests/*.c))
 
-btrfs_new_sources :=
+btrfs_new_sources := object-index.c object-index.h
 btrfs_new_headers :=
 
 new_sources := $(btrfs_new_sources)
