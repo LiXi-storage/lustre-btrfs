@@ -1,0 +1,140 @@
+From d777f7b5a4668abdc76ae924ea70ff42d7dcaff5 Mon Sep 17 00:00:00 2001
+From: Wang Shilong <wangshilong1991@gmail.com>
+Date: Mon, 16 Mar 2015 09:52:07 -0400
+Subject: [PATCH] btrfs: btrfs add transaction commit callback
+
+---
+ fs/btrfs/btrfs_inode.h | 20 ++++++++++++++++++++
+ fs/btrfs/transaction.c | 51 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ fs/btrfs/transaction.h |  3 +++
+ 3 files changed, 74 insertions(+)
+
+diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
+index 461ebb5..3514690 100644
+--- a/fs/btrfs/btrfs_inode.h
++++ b/fs/btrfs/btrfs_inode.h
+@@ -308,4 +308,24 @@ extern const struct file_operations btrfs_dir_file_operations;
+ extern const struct address_space_operations btrfs_aops;
+ extern const struct address_space_operations btrfs_symlink_aops;
+ extern struct extent_io_ops btrfs_extent_io_ops;
++
++struct btrfs_trans_cb_entry {
++	/* list information for other callbacks attached to the same handle */
++	struct list_head list;
++
++	/*  Function to call with this callback structure */
++	void (*function)(struct btrfs_trans_cb_entry *entry,
++			 int error);
++
++	/* user data goes here */
++};
++
++int btrfs_end_transaction(struct btrfs_trans_handle *trans,
++			  struct btrfs_root *root);
++void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
++				    void (*function)(struct btrfs_trans_cb_entry *entry,
++						     int error),
++				    struct btrfs_trans_cb_entry *callback);
++bool btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
++					struct btrfs_trans_cb_entry *callback);
+ #endif
+diff --git a/fs/btrfs/transaction.c b/fs/btrfs/transaction.c
+index e79bf88..eda0451 100644
+--- a/fs/btrfs/transaction.c
++++ b/fs/btrfs/transaction.c
+@@ -58,6 +58,53 @@ static unsigned int btrfs_blocked_trans_types[TRANS_STATE_MAX] = {
+ 					   __TRANS_JOIN_NOLOCK),
+ };
+ 
++void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
++				    void (*function)(struct btrfs_trans_cb_entry *entry,
++						     int error),
++				    struct btrfs_trans_cb_entry *callback)
++{
++	struct btrfs_transaction *cur_trans = trans->transaction;
++
++	callback->function = function;
++	spin_lock(&cur_trans->callback_lock);
++	list_add_tail(&callback->list, &cur_trans->commit_callbacks);
++	spin_unlock(&cur_trans->callback_lock);
++}
++EXPORT_SYMBOL(btrfs_add_transaction_callback);
++
++bool
++btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
++				   struct btrfs_trans_cb_entry *callback)
++{
++	bool deleted;
++	struct btrfs_transaction *cur_trans = trans->transaction;
++
++	spin_lock(&cur_trans->callback_lock);
++	deleted = !list_empty(&callback->list);
++	list_del_init(&callback->list);
++	spin_unlock(&cur_trans->callback_lock);
++
++	return deleted;
++}
++EXPORT_SYMBOL(btrfs_try_del_transaction_callback);
++
++static void btrfs_commit_transaction_callback(struct btrfs_transaction *trans)
++{
++	struct btrfs_trans_cb_entry *callback;
++
++	spin_lock(&trans->callback_lock);
++	while (!list_empty(&trans->commit_callbacks)) {
++		callback = list_entry(trans->commit_callbacks.next,
++				      struct btrfs_trans_cb_entry,
++				      list);
++		list_del_init(&callback->list);
++		spin_unlock(&trans->callback_lock);
++		callback->function(callback, trans->aborted);
++		spin_lock(&trans->callback_lock);
++	}
++	spin_unlock(&trans->callback_lock);
++}
++
+ void btrfs_put_transaction(struct btrfs_transaction *transaction)
+ {
+ 	WARN_ON(atomic_read(&transaction->use_count) == 0);
+@@ -72,6 +119,7 @@ void btrfs_put_transaction(struct btrfs_transaction *transaction)
+ 			list_del_init(&em->list);
+ 			free_extent_map(em);
+ 		}
++		btrfs_commit_transaction_callback(transaction);
+ 		kmem_cache_free(btrfs_transaction_cachep, transaction);
+ 	}
+ }
+@@ -220,6 +268,8 @@ loop:
+ 	INIT_LIST_HEAD(&cur_trans->pending_snapshots);
+ 	INIT_LIST_HEAD(&cur_trans->ordered_operations);
+ 	INIT_LIST_HEAD(&cur_trans->pending_chunks);
++	INIT_LIST_HEAD(&cur_trans->commit_callbacks);
++	spin_lock_init(&cur_trans->callback_lock);
+ 	INIT_LIST_HEAD(&cur_trans->switch_commits);
+ 	list_add_tail(&cur_trans->list, &fs_info->trans_list);
+ 	extent_io_tree_init(&cur_trans->dirty_pages,
+@@ -799,6 +849,7 @@ int btrfs_end_transaction(struct btrfs_trans_handle *trans,
+ {
+ 	return __btrfs_end_transaction(trans, root, 0);
+ }
++EXPORT_SYMBOL(btrfs_end_transaction);
+ 
+ int btrfs_end_transaction_throttle(struct btrfs_trans_handle *trans,
+ 				   struct btrfs_root *root)
+diff --git a/fs/btrfs/transaction.h b/fs/btrfs/transaction.h
+index 7dd558e..7034f03 100644
+--- a/fs/btrfs/transaction.h
++++ b/fs/btrfs/transaction.h
+@@ -57,6 +57,9 @@ struct btrfs_transaction {
+ 	struct list_head pending_snapshots;
+ 	struct list_head ordered_operations;
+ 	struct list_head pending_chunks;
++	spinlock_t callback_lock;
++	/* protected by callback_lock */
++	struct list_head commit_callbacks;
+ 	struct list_head switch_commits;
+ 	struct btrfs_delayed_ref_root delayed_refs;
+ 	int aborted;
+-- 
+1.8.3.1
+

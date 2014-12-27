@@ -1,0 +1,26 @@
+From a796207568c10f89553cae87dc3e92898b5df646 Mon Sep 17 00:00:00 2001
+From: Wang Shilong <wangshilong1991@gmail.com>
+Date: Mon, 16 Mar 2015 17:09:25 -0400
+Subject: [PATCH] mv xattr macros into btrfs
+
+---
+ fs/btrfs/xattr.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/fs/btrfs/xattr.h b/fs/btrfs/xattr.h
+index b3cc803..464fd67 100644
+--- a/fs/btrfs/xattr.h
++++ b/fs/btrfs/xattr.h
+@@ -21,6 +21,9 @@
+ 
+ #include <linux/xattr.h>
+ 
++#define XATTR_BTRFS_PREFIX "btrfs."
++#define XATTR_BTRFS_PREFIX_LEN (sizeof(XATTR_BTRFS_PREFIX) - 1)
++
+ extern const struct xattr_handler btrfs_xattr_acl_access_handler;
+ extern const struct xattr_handler btrfs_xattr_acl_default_handler;
+ extern const struct xattr_handler *btrfs_xattr_handlers[];
+-- 
+1.8.3.1
+

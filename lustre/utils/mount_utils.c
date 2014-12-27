@@ -51,6 +51,8 @@
 #include <sys/utsname.h>
 #include <linux/loop.h>
 #include <dlfcn.h>
+#include <selinux/selinux.h>
+#include <selinux/get_context_list.h>
 
 extern char *progname;
 extern int verbose;
@@ -917,9 +919,9 @@ static void append_context_for_mount(char *mntpt,
 
 	if (fcontext != NULL) {
 		strncat(mo_ldd->ldd_mount_opts,
-			sizeof(mo_ldd->ldd_mount_opts), ",context=");
+			",context=", sizeof(mo_ldd->ldd_mount_opts));
 		strncat(mo_ldd->ldd_mount_opts,
-			sizeof(mo_ldd->ldd_mount_opts), fcontext);
+			fcontext, sizeof(mo_ldd->ldd_mount_opts));
 		freecon(fcontext);
 	}
 }

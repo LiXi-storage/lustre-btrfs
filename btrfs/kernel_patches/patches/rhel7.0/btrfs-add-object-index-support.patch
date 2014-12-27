@@ -1,0 +1,761 @@
+From 821b50eeb53b3ba0210b4a335cea7094f03fc3d7 Mon Sep 17 00:00:00 2001
+From: Wang Shilong <wangshilong1991@gmail.com>
+Date: Mon, 16 Mar 2015 09:27:49 -0400
+Subject: [PATCH 1/5] btrfs: add object index support
+
+---
+ fs/btrfs/btrfs_inode.h  |  22 +++
+ fs/btrfs/inode.c        |  52 +++---
+ fs/btrfs/object-index.c | 461 ++++++++++++++++++++++++++++++++++++++++++++++++
+ fs/btrfs/object-index.h |  95 ++++++++++
+ 4 files changed, 599 insertions(+), 31 deletions(-)
+ create mode 100644 fs/btrfs/object-index.c
+ create mode 100644 fs/btrfs/object-index.h
+
+diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
+index a0cf3e5..461ebb5 100644
+--- a/fs/btrfs/btrfs_inode.h
++++ b/fs/btrfs/btrfs_inode.h
+@@ -286,4 +286,26 @@ static inline void btrfs_inode_resume_unlocked_dio(struct inode *inode)
+ 
+ bool btrfs_page_exists_in_range(struct inode *inode, loff_t start, loff_t end);
+ 
++struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
++			      struct btrfs_root *root,
++			      struct inode *dir,
++			      const char *name, int name_len,
++			      u64 ref_objectid, u64 objectid,
++			      umode_t mode, u64 *index);
++
++int btrfs_init_inode_security(struct btrfs_trans_handle *trans,
++			      struct inode *inode, struct inode *dir,
++			      const struct qstr *qstr);
++int btrfs_add_nondir(struct btrfs_trans_handle *trans,
++		     struct inode *dir, struct dentry *dentry,
++		     struct inode *inode, int backref, u64 index);
++extern const struct inode_operations_wrapper btrfs_dir_inode_operations;
++extern const struct inode_operations btrfs_symlink_inode_operations;
++extern const struct inode_operations btrfs_dir_ro_inode_operations;
++extern const struct inode_operations btrfs_special_inode_operations;
++extern const struct inode_operations btrfs_file_inode_operations;
++extern const struct file_operations btrfs_dir_file_operations;
++extern const struct address_space_operations btrfs_aops;
++extern const struct address_space_operations btrfs_symlink_aops;
++extern struct extent_io_ops btrfs_extent_io_ops;
+ #endif
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index 6a128d7..b65e871 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -65,16 +65,6 @@ struct btrfs_iget_args {
+ 	struct btrfs_root *root;
+ };
+ 
+-static const struct inode_operations_wrapper btrfs_dir_inode_operations;
+-static const struct inode_operations btrfs_symlink_inode_operations;
+-static const struct inode_operations btrfs_dir_ro_inode_operations;
+-static const struct inode_operations btrfs_special_inode_operations;
+-static const struct inode_operations btrfs_file_inode_operations;
+-static const struct address_space_operations btrfs_aops;
+-static const struct address_space_operations btrfs_symlink_aops;
+-static const struct file_operations btrfs_dir_file_operations;
+-static struct extent_io_ops btrfs_extent_io_ops;
+-
+ static struct kmem_cache *btrfs_inode_cachep;
+ static struct kmem_cache *btrfs_delalloc_work_cachep;
+ struct kmem_cache *btrfs_trans_handle_cachep;
+@@ -108,9 +98,9 @@ static struct extent_map *create_pinned_em(struct inode *inode, u64 start,
+ 
+ static int btrfs_dirty_inode(struct inode *inode);
+ 
+-static int btrfs_init_inode_security(struct btrfs_trans_handle *trans,
+-				     struct inode *inode,  struct inode *dir,
+-				     const struct qstr *qstr)
++int btrfs_init_inode_security(struct btrfs_trans_handle *trans,
++			      struct inode *inode, struct inode *dir,
++			      const struct qstr *qstr)
+ {
+ 	int err;
+ 
+@@ -5579,12 +5569,12 @@ int btrfs_set_inode_index(struct inode *dir, u64 *index)
+ 	return ret;
+ }
+ 
+-static struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+-				     struct btrfs_root *root,
+-				     struct inode *dir,
+-				     const char *name, int name_len,
+-				     u64 ref_objectid, u64 objectid,
+-				     umode_t mode, u64 *index)
++struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
++			      struct btrfs_root *root,
++			      struct inode *dir,
++			      const char *name, int name_len,
++			      u64 ref_objectid, u64 objectid,
++			      umode_t mode, u64 *index)
+ {
+ 	struct inode *inode;
+ 	struct btrfs_inode_item *inode_item;
+@@ -5799,9 +5789,9 @@ fail_dir_item:
+ 	return ret;
+ }
+ 
+-static int btrfs_add_nondir(struct btrfs_trans_handle *trans,
+-			    struct inode *dir, struct dentry *dentry,
+-			    struct inode *inode, int backref, u64 index)
++int btrfs_add_nondir(struct btrfs_trans_handle *trans,
++		     struct inode *dir, struct dentry *dentry,
++		     struct inode *inode, int backref, u64 index)
+ {
+ 	int err = btrfs_add_link(trans, dir, inode,
+ 				 dentry->d_name.name, dentry->d_name.len,
+@@ -8969,7 +8959,7 @@ static int btrfs_permission(struct inode *inode, int mask)
+ 	return generic_permission(inode, mask);
+ }
+ 
+-static const struct inode_operations_wrapper btrfs_dir_inode_operations = {
++const struct inode_operations_wrapper btrfs_dir_inode_operations = {
+ 	.ops = {
+ 	.getattr	= btrfs_getattr,
+ 	.lookup		= btrfs_lookup,
+@@ -8992,14 +8982,14 @@ static const struct inode_operations_wrapper btrfs_dir_inode_operations = {
+ 	},
+ 	.rename2	= btrfs_rename2,
+ };
+-static const struct inode_operations btrfs_dir_ro_inode_operations = {
++const struct inode_operations btrfs_dir_ro_inode_operations = {
+ 	.lookup		= btrfs_lookup,
+ 	.permission	= btrfs_permission,
+ 	.get_acl	= btrfs_get_acl,
+ 	.update_time	= btrfs_update_time,
+ };
+ 
+-static const struct file_operations btrfs_dir_file_operations = {
++const struct file_operations btrfs_dir_file_operations = {
+ 	.llseek		= generic_file_llseek,
+ 	.read		= generic_read_dir,
+ 	.readdir	= btrfs_real_readdir,
+@@ -9011,7 +9001,7 @@ static const struct file_operations btrfs_dir_file_operations = {
+ 	.fsync		= btrfs_sync_file,
+ };
+ 
+-static struct extent_io_ops btrfs_extent_io_ops = {
++struct extent_io_ops btrfs_extent_io_ops = {
+ 	.fill_delalloc = run_delalloc_range,
+ 	.submit_bio_hook = btrfs_submit_bio_hook,
+ 	.merge_bio_hook = btrfs_merge_bio_hook,
+@@ -9036,7 +9026,7 @@ static struct extent_io_ops btrfs_extent_io_ops = {
+  *
+  * For now we're avoiding this by dropping bmap.
+  */
+-static const struct address_space_operations btrfs_aops = {
++const struct address_space_operations btrfs_aops = {
+ 	.readpage	= btrfs_readpage,
+ 	.writepage	= btrfs_writepage,
+ 	.writepages	= btrfs_writepages,
+@@ -9048,14 +9038,14 @@ static const struct address_space_operations btrfs_aops = {
+ 	.error_remove_page = generic_error_remove_page,
+ };
+ 
+-static const struct address_space_operations btrfs_symlink_aops = {
++const struct address_space_operations btrfs_symlink_aops = {
+ 	.readpage	= btrfs_readpage,
+ 	.writepage	= btrfs_writepage,
+ 	.invalidatepage = btrfs_invalidatepage,
+ 	.releasepage	= btrfs_releasepage,
+ };
+ 
+-static const struct inode_operations btrfs_file_inode_operations = {
++const struct inode_operations btrfs_file_inode_operations = {
+ 	.getattr	= btrfs_getattr,
+ 	.setattr	= btrfs_setattr,
+ 	.setxattr	= btrfs_setxattr,
+@@ -9067,7 +9057,7 @@ static const struct inode_operations btrfs_file_inode_operations = {
+ 	.get_acl	= btrfs_get_acl,
+ 	.update_time	= btrfs_update_time,
+ };
+-static const struct inode_operations btrfs_special_inode_operations = {
++const struct inode_operations btrfs_special_inode_operations = {
+ 	.getattr	= btrfs_getattr,
+ 	.setattr	= btrfs_setattr,
+ 	.permission	= btrfs_permission,
+@@ -9078,7 +9068,7 @@ static const struct inode_operations btrfs_special_inode_operations = {
+ 	.get_acl	= btrfs_get_acl,
+ 	.update_time	= btrfs_update_time,
+ };
+-static const struct inode_operations btrfs_symlink_inode_operations = {
++const struct inode_operations btrfs_symlink_inode_operations = {
+ 	.readlink	= generic_readlink,
+ 	.follow_link	= page_follow_link_light,
+ 	.put_link	= page_put_link,
+diff --git a/fs/btrfs/object-index.c b/fs/btrfs/object-index.c
+new file mode 100644
+index 0000000..397c0c6
+--- /dev/null
++++ b/fs/btrfs/object-index.c
+@@ -0,0 +1,461 @@
++/*
++ * Copyright (C) 2014 DataDirect Networks.  All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public
++ * License v2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public
++ * License along with this program; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 021110-1307, USA.
++ */
++
++#include <linux/sched.h>
++#include <linux/pagemap.h>
++#include <linux/writeback.h>
++#include <linux/blkdev.h>
++#include <linux/slab.h>
++#include <linux/btrfs.h>
++#include <linux/export.h>
++
++#include "ctree.h"
++#include "transaction.h"
++#include "disk-io.h"
++#include "extent_io.h"
++#include "object-index.h"
++#include "transaction.h"
++#include "inode-map.h"
++
++BTRFS_SETGET_FUNCS(oi_ino, struct btrfs_oi_ino_item,
++		   oi_ino, 64);
++BTRFS_SETGET_FUNCS(oi_gen, struct btrfs_oi_ino_item,
++		   oi_gen, 64);
++BTRFS_SETGET_STACK_FUNCS(stack_oi_ino, struct btrfs_oi_ino_item,
++			 oi_ino, 64);
++BTRFS_SETGET_STACK_FUNCS(stack_oi_gen, struct btrfs_oi_ino_item,
++			 oi_gen, 64);
++
++BTRFS_SETGET_FUNCS(f_seq, struct btrfs_oi_fid_item,
++		   f_seq, 64);
++BTRFS_SETGET_FUNCS(f_oid, struct btrfs_oi_fid_item,
++		   f_oid, 32);
++BTRFS_SETGET_FUNCS(f_ver, struct btrfs_oi_fid_item,
++		   f_ver, 32);
++BTRFS_SETGET_STACK_FUNCS(stack_f_seq, struct btrfs_oi_fid_item,
++			 f_seq, 64);
++BTRFS_SETGET_STACK_FUNCS(stack_f_oid, struct btrfs_oi_fid_item,
++			 f_oid, 32);
++BTRFS_SETGET_STACK_FUNCS(stack_f_ver, struct btrfs_oi_fid_item,
++			 f_ver, 32);
++
++static int oi_delete_item(struct btrfs_trans_handle *trans,
++			  struct btrfs_root *root, struct btrfs_key *key)
++{
++	int ret;
++	struct btrfs_path *path;
++
++	path = btrfs_alloc_path();
++	if (!path)
++		return -ENOMEM;
++
++	ret = btrfs_search_slot(trans, root, key, path, -1, 1);
++	if (ret < 0)
++		goto out;
++
++	if (ret > 0) {
++		ret = -ENOENT;
++		goto out;
++	}
++	ret = btrfs_del_item(trans, root, path);
++out:
++	btrfs_free_path(path);
++	return ret;
++}
++
++static int btrfs_oi_inert_ino(struct btrfs_trans_handle *trans,
++			      struct btrfs_root *root,
++			      struct btrfs_lu_fid *fid, u64 ino, u64 gen)
++{
++	struct btrfs_key key;
++	struct btrfs_oi_ino_item ino_item;
++
++	btrfs_lu_fid_to_key(fid, &key);
++	btrfs_set_stack_oi_ino(&ino_item, ino);
++	btrfs_set_stack_oi_gen(&ino_item, gen);
++
++	return btrfs_insert_item(trans, root, &key, &ino_item,
++				 sizeof(ino_item));
++}
++
++static int btrfs_oi_inert_fid(struct btrfs_trans_handle *trans,
++			      struct btrfs_root *root,
++			      struct btrfs_lu_fid *fid, u64 ino, u64 gen)
++{
++	struct btrfs_key key;
++	struct btrfs_oi_fid_item fid_item;
++
++	btrfs_lu_ino_to_key(ino, gen, &key);
++	btrfs_set_stack_f_seq(&fid_item, fid->f_seq);
++	btrfs_set_stack_f_oid(&fid_item, fid->f_oid);
++	btrfs_set_stack_f_ver(&fid_item, fid->f_ver);
++
++	return btrfs_insert_item(trans, root, &key, &fid_item,
++				 sizeof(fid_item));
++}
++
++int btrfs_oi_insert(struct btrfs_trans_handle *trans, struct super_block *sb,
++		    struct btrfs_lu_fid *fid, u64 ino, u64 gen)
++{
++	int ret;
++	int err;
++	struct btrfs_key key;
++	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
++	struct btrfs_root *root = fs_info->fs_root;
++
++	/* just in case */
++	root = root->fs_info->fs_root;
++
++	ret = btrfs_oi_inert_ino(trans, root, fid, ino, gen);
++	if (ret)
++		return ret;
++
++	ret = btrfs_oi_inert_fid(trans, root, fid, ino, gen);
++	if (ret) {
++		btrfs_lu_fid_to_key(fid, &key);
++		err = oi_delete_item(trans, root, &key);
++		if (!err)
++			return ret;
++		btrfs_error(root->fs_info, err,
++			    "failed to delete incomplete OI");
++	}
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_oi_insert);
++
++int btrfs_oi_delete_with_fid(struct btrfs_trans_handle *trans,
++			     struct super_block *sb, struct btrfs_lu_fid *fid)
++{
++	struct btrfs_key key;
++	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
++	struct btrfs_root *root = fs_info->fs_root;
++	int ret;
++	int err;
++	u64 gen, ino;
++
++	ret = btrfs_oi_lookup_with_fid(sb, fid, &ino, &gen);
++	if (ret)
++		return ret;
++
++	btrfs_lu_fid_to_key(fid, &key);
++	ret = oi_delete_item(trans, root, &key);
++	if (ret)
++		return ret;
++
++	btrfs_lu_ino_to_key(ino, gen, &key);
++	ret = oi_delete_item(trans, root, &key);
++	if (ret) {
++		err = btrfs_oi_inert_ino(trans, root, fid, ino, gen);
++		if (!err)
++			return ret;
++		btrfs_error(root->fs_info, ret, "failed to delete [ino fid]");
++	}
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_oi_delete_with_fid);
++
++int btrfs_oi_delete_with_ino(struct btrfs_trans_handle *trans,
++			     struct super_block *sb, u64 ino, u64 gen)
++{
++	struct btrfs_key key;
++	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
++	struct btrfs_root *root = fs_info->fs_root;
++	struct btrfs_lu_fid fid;
++	int err;
++	int ret;
++
++	ret = btrfs_oi_lookup_with_ino(sb, ino, gen, &fid);
++	if (ret)
++		return ret;
++
++	btrfs_lu_ino_to_key(ino, gen, &key);
++	ret = oi_delete_item(trans, root, &key);
++	if (ret)
++		return ret;
++
++	btrfs_lu_fid_to_key(&fid, &key);
++	ret = oi_delete_item(trans, root, &key);
++	if (ret) {
++		err = btrfs_oi_inert_fid(trans, root, &fid, ino, gen);
++		if (!err)
++			return ret;
++		btrfs_error(root->fs_info, ret, "failed to delete [fid, ino]");
++	}
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_oi_delete_with_ino);
++
++/* no transaction protection for lookup is ok */
++int btrfs_oi_lookup_with_fid(struct super_block *sb, struct btrfs_lu_fid *fid,
++			     u64 *ino, u64 *gen)
++{
++	int ret;
++	struct btrfs_path *path;
++	struct btrfs_key key;
++	struct btrfs_oi_ino_item *item;
++	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
++	struct btrfs_root *root = fs_info->fs_root;
++
++	path = btrfs_alloc_path();
++	if (!path)
++		return -ENOMEM;
++
++	btrfs_lu_fid_to_key(fid, &key);
++	ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
++	if (ret < 0) {
++		goto out;
++	} else if (ret > 0) {
++		ret = -ENOENT;
++		goto out;
++	}
++
++	item = btrfs_item_ptr(path->nodes[0], path->slots[0],
++			      struct btrfs_oi_ino_item);
++	*ino = btrfs_oi_ino(path->nodes[0], item);
++	*gen = btrfs_oi_gen(path->nodes[0], item);
++out:
++	btrfs_free_path(path);
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_oi_lookup_with_fid);
++
++/*
++ * Given inode number and generation, return corresponding fid.
++ */
++int btrfs_oi_lookup_with_ino(struct super_block *sb, u64 ino, u64 gen,
++			     struct btrfs_lu_fid *fid)
++{
++	int ret;
++	struct btrfs_path *path;
++	struct btrfs_key key;
++	struct btrfs_oi_fid_item *item;
++	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
++	struct btrfs_root *root = fs_info->fs_root;
++
++	path = btrfs_alloc_path();
++	if (!path)
++		return -ENOMEM;
++
++	btrfs_lu_ino_to_key(ino, gen, &key);
++	ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
++	if (ret < 0) {
++		goto failed;
++	} else if (ret > 0) {
++		ret = -ENOENT;
++		goto failed;
++	}
++	item = btrfs_item_ptr(path->nodes[0], path->slots[0],
++			      struct btrfs_oi_fid_item);
++	fid->f_seq = btrfs_f_seq(path->nodes[0], item);
++	fid->f_oid = btrfs_f_oid(path->nodes[0], item);
++	fid->f_ver = btrfs_f_ver(path->nodes[0], item);
++failed:
++	btrfs_free_path(path);
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_oi_lookup_with_ino);
++
++/*
++ * Given an inode number, return corresponding inode
++ */
++struct inode *btrfs_inode_get(struct super_block *sb, u64 ino)
++{
++	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
++	struct btrfs_root *root = fs_info->fs_root;
++	struct inode *inode;
++	struct btrfs_key location;
++	int new;
++
++	root = root->fs_info->fs_root;
++
++	location.objectid = ino;
++	location.type = BTRFS_INODE_ITEM_KEY;
++	location.offset = 0;
++
++	inode = btrfs_iget(root->fs_info->sb, &location, root, &new);
++
++	/* LIXI TODO: check generation */
++	return inode;
++}
++EXPORT_SYMBOL(btrfs_inode_get);
++
++int btrfs_oi_test(struct super_block *sb)
++{
++	int ret;
++	struct btrfs_lu_fid fid = {123, 456, 7890};
++	u64 ino;
++	u64 gen;
++	struct btrfs_trans_handle *trans;
++	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
++	struct btrfs_root *root = fs_info->fs_root;
++
++	btrfs_info(fs_info, "object index test begin");
++	trans = btrfs_start_transaction(root, 2);
++	if (IS_ERR(trans)) {
++		btrfs_err(fs_info,
++			  "failed to start transaction: %ld",
++			  PTR_ERR(trans));
++		return PTR_ERR(trans);
++	}
++
++	btrfs_info(fs_info, "trying to insert an object index");
++	ret = btrfs_oi_insert(trans, sb, &fid, 123, 321);
++	btrfs_end_transaction(trans, root);
++	if (ret) {
++		btrfs_err(fs_info, "failed to insert object index");
++		return ret;
++	}
++
++	btrfs_info(fs_info,
++		   "trying to find the inserted object index with fid");
++	ret  = btrfs_oi_lookup_with_fid(sb, &fid, &ino, &gen);
++	if (ret < 0) {
++		btrfs_err(fs_info,
++			  "failed to find object index: %d", ret);
++		return ret;
++	}
++	if (ino != 123 || gen != 321) {
++		btrfs_err(fs_info,
++			  "wrong inode number/generation, "
++			  "expected 123/321, got %llu/%llu",
++			  ino, gen);
++		return -ENOENT;
++	}
++
++	btrfs_info(fs_info,
++		   "trying to find the inserted object index with ino");
++	ret  = btrfs_oi_lookup_with_ino(sb, 123, 321, &fid);
++	if (ret < 0) {
++		btrfs_err(fs_info,
++			  "failed to find object index: %d", ret);
++		return ret;
++	}
++	if (fid.f_seq != 123 || fid.f_oid != 456 ||
++	    fid.f_ver != 7890) {
++		btrfs_err(fs_info,
++			  "wrong fid seq/obj/ver, "
++			  "expected 123/456/7890, got %llu/%u/%u",
++			  fid.f_seq, fid.f_oid, fid.f_ver);
++		return -ENOENT;
++	}
++
++	trans = btrfs_start_transaction(root, 2);
++	if (IS_ERR(trans)) {
++		btrfs_err(fs_info,
++			  "failed to start transaction: %ld",
++			  PTR_ERR(trans));
++		return PTR_ERR(trans);
++	}
++
++	btrfs_info(fs_info, "deleting the object index with ino");
++	ret = btrfs_oi_delete_with_ino(trans, sb, 123, 321);
++	btrfs_end_transaction(trans, root);
++	if (ret) {
++		btrfs_err(fs_info,
++			  "failed to delete object index: %d", ret);
++		return ret;
++	}
++
++	btrfs_info(fs_info, "trying to find the deleted "
++		   "object index with ino again");
++	ret  = btrfs_oi_lookup_with_ino(sb, 123, 321, &fid);
++	if (ret != -ENOENT) {
++		btrfs_err(fs_info,
++			  "deleted object index still exists");
++		return ret;
++	} else {
++		ret = 0;
++	}
++	ret  = btrfs_oi_lookup_with_fid(sb, &fid, &ino, &gen);
++	if (ret != -ENOENT) {
++		btrfs_err(fs_info,
++			  "deleted object index [fid,ino] still exists");
++		return ret;
++	} else {
++		ret = 0;
++	}
++
++	trans = btrfs_start_transaction(root, 2);
++	if (IS_ERR(trans)) {
++		btrfs_err(fs_info,
++			  "failed to start transaction: %ld",
++			  PTR_ERR(trans));
++		return PTR_ERR(trans);
++	}
++
++	ret = btrfs_oi_insert(trans, sb, &fid, 123, 321);
++	btrfs_end_transaction(trans, root);
++	if (ret) {
++		btrfs_err(fs_info,
++			  "failed to delete object index: %d", ret);
++		return ret;
++	}
++	trans = btrfs_start_transaction(root, 2);
++	if (IS_ERR(trans)) {
++		btrfs_err(fs_info,
++			  "failed to start transaction: %ld",
++			  PTR_ERR(trans));
++		return PTR_ERR(trans);
++	}
++	btrfs_info(fs_info, "deleting the object index with fid");
++	ret = btrfs_oi_delete_with_fid(trans, sb, &fid);
++	btrfs_end_transaction(trans, root);
++	if (ret) {
++		btrfs_err(fs_info,
++			  "failed to delete object index with fid: %d", ret);
++		return ret;
++	}
++	ret  = btrfs_oi_lookup_with_fid(sb, &fid, &ino, &gen);
++	if (ret != -ENOENT) {
++		btrfs_err(fs_info,
++			  "deleted object index [fid,ino] still exists");
++		return ret;
++	} else {
++		ret = 0;
++	}
++	ret  = btrfs_oi_lookup_with_ino(sb, 123, 321, &fid);
++	if (ret != -ENOENT) {
++		btrfs_err(fs_info,
++			  "deleted object index[ino, fid] still exists");
++		return ret;
++	} else {
++		ret = 0;
++	}
++
++	btrfs_info(fs_info, "object index test finished");
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_oi_test);
++
++/* Start a transaction and return the handle */
++struct btrfs_trans_handle *btrfs_trans_start(struct super_block *sb,
++					     int num_items)
++{
++	struct btrfs_root *root = btrfs_sb(sb)->fs_root;
++
++	return btrfs_start_transaction(root, num_items);
++}
++EXPORT_SYMBOL(btrfs_trans_start);
++
++int btrfs_trans_stop(struct super_block *sb, struct btrfs_trans_handle *trans)
++{
++	struct btrfs_root *root = btrfs_sb(sb)->fs_root;
++
++	return btrfs_end_transaction(trans, root);
++}
++EXPORT_SYMBOL(btrfs_trans_stop);
+diff --git a/fs/btrfs/object-index.h b/fs/btrfs/object-index.h
+new file mode 100644
+index 0000000..d5d1f0c
+--- /dev/null
++++ b/fs/btrfs/object-index.h
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (C) 2014 DataDirect Networks, Inc.  All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public
++ * License v2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public
++ * License along with this program; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 021110-1307, USA.
++ */
++
++#ifndef __BTRFS_OBJECT_INDEX__
++#define __BTRFS_OBJECT_INDEX__
++
++#include "ctree.h"
++
++struct btrfs_lu_fid {
++	u64 f_seq;
++	u32 f_oid;
++	u32 f_ver;
++};
++
++struct btrfs_oi_ino_item {
++	__le64 oi_ino; /* Inode number */
++	__le64 oi_gen; /* Inode generation */
++} __attribute__ ((__packed__));
++
++struct btrfs_oi_fid_item {
++	__le64 f_seq;
++	__le32 f_oid;
++	__le32 f_ver;
++} __attribute__ ((__packed__));
++
++/*
++ * Now all OI mapping is stored in FS root, which means
++ * snapshots and change default roots will have some problems
++ * here, but for initial benchmarking, this should be ok.
++ *
++ * mapping fid to inode:
++ * btrfs_key ->[f_seq, BTRFS_LUSTRE_OI_FID_KEY, f_oid | f_ver]
++ * btrfs_data->[ino, gen]
++ *
++ * mapping inode to fid:
++ * btrfs_key ->[ino, BTRFS_LUSTRE_OI_INO_KEY, gen]
++ * btrfs_data->[fid]
++ *
++ */
++#define BTRFS_LUSTRE_OI_FID_KEY 50
++#define BTRFS_LUSTRE_OI_INO_KEY 51
++
++static inline void btrfs_lu_fid_to_key(struct btrfs_lu_fid *fid,
++				       struct btrfs_key *key)
++{
++	u64 offset = fid->f_oid;
++	offset <<= 32;
++	offset |= fid->f_ver;
++
++	key->objectid = fid->f_seq;
++	key->type = BTRFS_LUSTRE_OI_FID_KEY;
++	key->offset = offset;
++}
++
++static inline void btrfs_lu_ino_to_key(u64 ino, u64 gen, struct btrfs_key *key)
++{
++	key->objectid = ino;
++	key->type = BTRFS_LUSTRE_OI_INO_KEY;
++	key->offset = gen;
++}
++
++int btrfs_oi_test(struct super_block *sb);
++int btrfs_oi_lookup_with_fid(struct super_block *sb, struct btrfs_lu_fid *fid,
++			     u64 *ino, u64 *gen);
++int btrfs_oi_lookup_with_ino(struct super_block *sb, u64 ino, u64 gen,
++			     struct btrfs_lu_fid *fid);
++
++int btrfs_oi_insert(struct btrfs_trans_handle *trans, struct super_block *sb,
++		    struct btrfs_lu_fid *fid, u64 ino, u64 gen);
++int btrfs_oi_delete_with_fid(struct btrfs_trans_handle *trans,
++			     struct super_block *sb, struct btrfs_lu_fid *fid);
++int btrfs_oi_delete_with_ino(struct btrfs_trans_handle *trans,
++			     struct super_block *sb, u64 ino, u64 gen);
++
++struct inode *btrfs_inode_get(struct super_block *sb, u64 ino);
++
++struct btrfs_trans_handle *btrfs_trans_start(struct super_block *sb,
++					     int num_items);
++int btrfs_trans_stop(struct super_block *sb, struct btrfs_trans_handle *trans);
++#endif
+-- 
+1.8.3.1
+
