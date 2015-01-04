@@ -178,7 +178,7 @@ static int osd_sync(const struct lu_env *env, struct dt_device *d)
 	int rc;
 
 	CDEBUG(D_CACHE, "syncing OSD %s\n", LUSTRE_OSD_BTRFS_NAME);
-	/* LIXI TODO: add actual sync function */
+	/* LIXI TODO: add actual sync function: btrfs_sync_fs */
 	rc = 0;
 	CDEBUG(D_CACHE, "synced OSD %s: rc = %d\n",
 	       LUSTRE_OSD_BTRFS_NAME, rc);

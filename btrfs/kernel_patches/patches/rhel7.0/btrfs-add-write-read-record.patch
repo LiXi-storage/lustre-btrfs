@@ -73,7 +73,7 @@ Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/file.c
 +                boffs = *offs & (blocksize - 1);
 +                csize = min(blocksize - boffs, size);
 +		/* readpages handling */
-+		ret = prepare_pages(inode, pages, nrptrs, *offs, size, false);
++		ret = prepare_pages(inode, pages, nrptrs, *offs, size, true);
 +                if (ret != 0) {
 +                        btrfs_err(fs_info,
 +				  "%s: can't read %u@%llu on ino %lu, %d",

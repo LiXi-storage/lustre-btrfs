@@ -621,7 +621,6 @@ out:
 int ofd_fs_setup(const struct lu_env *env, struct ofd_device *ofd,
 		 struct obd_device *obd)
 {
-#ifdef LIXI
 	struct ofd_thread_info	*info = ofd_info(env);
 	struct dt_object	*fo;
 	int			 rc = 0;
@@ -654,11 +653,6 @@ out_seqs:
 	ofd_seqs_fini(env, ofd);
 out:
 	return rc;
-#else /* LIXI */
-	ENTRY;
-	printk("LIXI ofd_fs_setup\n");
-	RETURN(0);
-#endif /* LIXI */
 }
 
 /**
