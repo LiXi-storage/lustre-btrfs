@@ -152,10 +152,8 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 	struct dt_object_format	 dof;
 	struct lu_attr		 attr;
 	struct lu_fid		 fid;
-#ifdef LIXI
 	struct dt_object	*o;
 	int			 rc = 0;
-#endif /* LIXI */
 
 	ENTRY;
 
@@ -202,7 +200,6 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 
 	lu_local_obj_fid(&fid, LAST_RECV_OID);
 
-#ifdef LIXI
 	o = dt_find_or_create(env, lut->lut_bottom, &fid, &dof, &attr);
 	if (IS_ERR(o)) {
 		rc = PTR_ERR(o);
@@ -215,7 +212,6 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 	rc = tgt_server_data_init(env, lut);
 	if (rc < 0)
 		GOTO(out_put, rc);
-#endif /* LIXI */
 
 	/* prepare transactions callbacks */
 	lut->lut_txn_cb.dtc_txn_start = tgt_txn_start_cb;
@@ -231,12 +227,10 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 	/* reply_data is supported by MDT targets only for now */
 	if (strncmp(obd->obd_type->typ_name, LUSTRE_MDT_NAME, 3) != 0)
 		RETURN(0);
-#ifdef LIXI
 	OBD_ALLOC(lut->lut_reply_bitmap,
 		  LUT_REPLY_SLOTS_MAX_CHUNKS * sizeof(unsigned long *));
 	if (lut->lut_reply_bitmap == NULL)
 		GOTO(out, rc);
-#endif /* LIXI */
 
 	memset(&attr, 0, sizeof(attr));
 	attr.la_valid = LA_MODE;
@@ -245,7 +239,6 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 
 	lu_local_obj_fid(&fid, REPLY_DATA_OID);
 
-#ifdef LIXI
 	o = dt_find_or_create(env, lut->lut_bottom, &fid, &dof, &attr);
 	if (IS_ERR(o)) {
 		rc = PTR_ERR(o);
@@ -258,14 +251,11 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 	rc = tgt_reply_data_init(env, lut);
 	if (rc < 0)
 		GOTO(out, rc);
-#endif /* LIXI */
-
 
 	atomic_set(&lut->lut_sync_count, 0);
 
 	RETURN(0);
 
-#ifdef LIXI
 out:
 	dt_txn_callback_del(lut->lut_bottom, &lut->lut_txn_cb);
 out_put:
@@ -286,7 +276,6 @@ out_put:
 			 LUT_REPLY_SLOTS_MAX_CHUNKS * sizeof(unsigned long *));
 	lut->lut_reply_bitmap = NULL;
 	return rc;
-#endif /* LIXI */
 }
 EXPORT_SYMBOL(tgt_init);
 

@@ -467,6 +467,147 @@ struct dt_index_operations osd_dir_ops = {
 #endif /* LIXI */
 };
 
+static struct dt_it *osd_index_it_init(const struct lu_env *env,
+				       struct dt_object *dt,
+				       __u32 unused)
+{
+	struct osd_thread_info	*info = osd_oti_get(env);
+	struct osd_it_index	*it;
+	struct osd_object	*obj = osd_dt_obj(dt);
+	struct lu_object	*lo = &dt->do_lu;
+	ENTRY;
+
+	LASSERT(lu_object_exists(lo));
+	LASSERT(obj->oo_inode);
+	LASSERT(S_ISDIR(obj->oo_inode->i_mode));
+	LASSERT(info);
+
+	if (info->oti_it_inline) {
+		OBD_ALLOC_PTR(it);
+		if (it == NULL)
+			RETURN(ERR_PTR(-ENOMEM));
+	} else {
+		it = &info->oti_it_index;
+		info->oti_it_inline = 1;
+	}
+
+	it->oii_obj = obj;
+	lu_object_get(lo);
+	RETURN((struct dt_it *)it);
+}
+
+static void osd_index_it_fini(const struct lu_env *env, struct dt_it *di)
+{
+	struct osd_thread_info	*info = osd_oti_get(env);
+	struct osd_it_index	*it = (struct osd_it_index *)di;
+	struct osd_object	*obj = it->oii_obj;
+	ENTRY;
+
+	LASSERT(it);
+	LASSERT(obj);
+
+	lu_object_put(env, &obj->oo_dt.do_lu);
+	if (it != &info->oti_it_index)
+		OBD_FREE_PTR(it);
+	else
+		info->oti_it_inline = 0;
+	EXIT;
+}
+
+static void osd_index_it_put(const struct lu_env *env, struct dt_it *di)
+{
+	/* PBS: do nothing : ref are incremented at retrive and decreamented
+	 *      next/finish. */
+}
+
+static int osd_index_it_get(const struct lu_env *env, struct dt_it *di,
+			    const struct dt_key *key)
+{
+	ENTRY;
+	RETURN(-EIO);
+}
+
+static int osd_index_it_next(const struct lu_env *env, struct dt_it *di)
+{
+	ENTRY;
+	RETURN(-EIO);
+}
+
+static struct dt_key *osd_index_it_key(const struct lu_env *env,
+				       const struct dt_it *di)
+{
+	ENTRY;
+	RETURN(ERR_PTR(-EIO));
+}
+
+static int osd_index_it_key_size(const struct lu_env *env,
+				const struct dt_it *di)
+{
+	ENTRY;
+	RETURN(-EIO);
+}
+
+static int osd_index_it_rec(const struct lu_env *env, const struct dt_it *di,
+			    struct dt_rec *rec, __u32 attr)
+{
+	ENTRY;
+	RETURN(-EIO);
+}
+
+static __u64 osd_index_it_store(const struct lu_env *env,
+				const struct dt_it *di)
+{
+	ENTRY;
+	RETURN(-EIO);
+}
+
+static int osd_index_it_load(const struct lu_env *env, const struct dt_it *di,
+			     __u64 hash)
+{
+	ENTRY;
+	RETURN(0);
+}
+
+static struct dt_index_operations osd_index_ops = {
+#ifdef LIXI
+	.dio_lookup		= osd_index_lookup,
+	.dio_declare_insert	= osd_declare_index_insert,
+	.dio_insert		= osd_index_insert,
+	.dio_declare_delete	= osd_declare_index_delete,
+	.dio_delete		= osd_index_delete,
+	.dio_it	= {
+		.init		= osd_index_it_init,
+		.fini		= osd_index_it_fini,
+		.get		= osd_index_it_get,
+		.put		= osd_index_it_put,
+		.next		= osd_index_it_next,
+		.key		= osd_index_it_key,
+		.key_size	= osd_index_it_key_size,
+		.rec		= osd_index_it_rec,
+		.store		= osd_index_it_store,
+		.load		= osd_index_it_load
+	}
+#else /* LIXI */
+	.dio_lookup		= NULL,
+	.dio_declare_insert	= NULL,
+	.dio_insert		= NULL,
+	.dio_declare_delete	= NULL,
+	.dio_delete		= NULL,
+	.dio_it	= {
+		.init		= osd_index_it_init,
+		.fini		= osd_index_it_fini,
+		.get		= osd_index_it_get,
+		.put		= osd_index_it_put,
+		.next		= osd_index_it_next,
+		.key		= osd_index_it_key,
+		.key_size	= osd_index_it_key_size,
+		.rec		= osd_index_it_rec,
+		.store		= osd_index_it_store,
+		.load		= osd_index_it_load
+	}
+#endif /* LIXI */
+};
+
 int osd_index_try(const struct lu_env *env, struct dt_object *dt,
 		  const struct dt_index_features *feat)
 {
@@ -481,6 +622,9 @@ int osd_index_try(const struct lu_env *env, struct dt_object *dt,
 #endif /* LIXI */
 	LINVRNT(osd_invariant(obj));
 
+	LASSERT(feat != &dt_acct_features);
+	LASSERT(feat != &dt_otable_features);
+
 	if (likely(feat == &dt_directory_features)) {
 		if (obj->oo_inode == NULL || !S_ISDIR(obj->oo_inode->i_mode))
 			GOTO(out, rc = -ENOTDIR);
@@ -490,6 +634,9 @@ int osd_index_try(const struct lu_env *env, struct dt_object *dt,
 		LASSERT(fid_is_acct(lu_object_fid(&dt->do_lu)));
 		dt->do_index_ops = &osd_acct_index_ops;
 #endif /* LIXI */
+	} else if (S_ISDIR(obj->oo_inode->i_mode) &&
+		   dt->do_index_ops == NULL) {
+		dt->do_index_ops = &osd_index_ops;
 	}
 
 out:

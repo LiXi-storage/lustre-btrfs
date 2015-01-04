@@ -530,7 +530,7 @@ static int ofd_lfsck_out_notify(const struct lu_env *env, void *data,
 				enum lfsck_events event)
 #else /* LIXI */
 int ofd_lfsck_out_notify(const struct lu_env *env, void *data,
-				enum lfsck_events event)
+			 enum lfsck_events event)
 #endif /* LIXI */
 {
 	struct ofd_device *ofd = data;
@@ -612,8 +612,8 @@ static int ofd_prepare(const struct lu_env *env, struct lu_device *pdev,
 	 * register the namespace to such instance. */
 	LASSERTF(rc == 0, "register namespace failed: rc = %d\n", rc);
 
-	target_recovery_init(&ofd->ofd_lut, tgt_request_handle);
 #endif /* LIXI */
+	target_recovery_init(&ofd->ofd_lut, tgt_request_handle);
 	LASSERT(obd->obd_no_conn);
 	spin_lock(&obd->obd_dev_lock);
 	obd->obd_no_conn = 0;

@@ -130,6 +130,28 @@ struct osd_device {
 	struct osd_mdobj_map	*od_mdt_map;
 };
 
+struct osd_object {
+	struct dt_object	 oo_dt;
+	/**
+	 * Inode for file system object represented by this osd_object. This
+	 * inode is pinned for the whole duration of lu_object life.
+	 *
+	 * Not modified concurrently (either setup early during object
+	 * creation, or assigned by osd_object_create() under write lock).
+	 */
+	struct inode		*oo_inode;
+	/** write/read lock of object. */
+	struct rw_semaphore	 oo_sem;
+	/** protects inode attributes. */
+	spinlock_t		 oo_guard;
+	/** Btrfs index */
+	u64			 oo_index;
+};
+
+struct osd_it_index {
+	struct osd_object	*oii_obj;
+};
+
 struct osd_thread_info {
 	const struct lu_env	 *oti_env;
 	struct kstatfs		  oti_ksfs;
@@ -151,6 +173,8 @@ struct osd_thread_info {
 	struct page		**oti_pages;
 	struct lu_seq_range	  oti_seq_range;
 	struct ost_id		  oti_ostid;
+	unsigned int		  oti_it_inline:1;
+	struct osd_it_index	  oti_it_index;
 };
 
 struct osd_thandle {
@@ -161,24 +185,6 @@ struct osd_thandle {
 	struct list_head		 ot_dcb_list;
 	/* Link to the device, for debugging. */
 	struct lu_ref_link		 ot_dev_link;
-};
-
-struct osd_object {
-	struct dt_object	 oo_dt;
-	/**
-	 * Inode for file system object represented by this osd_object. This
-	 * inode is pinned for the whole duration of lu_object life.
-	 *
-	 * Not modified concurrently (either setup early during object
-	 * creation, or assigned by osd_object_create() under write lock).
-	 */
-	struct inode		*oo_inode;
-	/** write/read lock of object. */
-	struct rw_semaphore	 oo_sem;
-	/** protects inode attributes. */
-	spinlock_t		 oo_guard;
-	/** Btrfs index */
-	u64			 oo_index;
 };
 
 /**

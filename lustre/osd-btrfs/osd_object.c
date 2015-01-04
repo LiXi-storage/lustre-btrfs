@@ -310,7 +310,9 @@ static int __osd_oi_insert(const struct lu_env *env, struct osd_object *obj,
 	 * dentries of other fids will be added in dt_insert()
 	 */
 	if (unlikely(fid_is_last_id(fid)) ||
-	    fid_is_on_ost(env, osd, fid) || fid_is_llog(fid)) {
+	    fid_is_on_ost(env, osd, fid) ||
+	    fid_is_llog(fid) ||
+	    fid_seq(fid) == FID_SEQ_LOCAL_FILE) {
 		rc = osd_get_idx_and_name(info, osd, fid, &dprant,
 					  (char *)info->oti_str,
 					  sizeof(info->oti_str));
@@ -374,6 +376,10 @@ static int __osd_object_create(struct osd_thread_info *info,
 		parent = hint->dah_parent;
 	if (parent != NULL)
 		dir = osd_dt_obj(parent)->oo_inode;
+
+	/* Index is not file but a directory */
+	if (dof->dof_type)
+		attr->la_mode = S_IFDIR | ((~S_IFMT) & attr->la_mode);
 
 	mutex_lock(&dir->i_mutex);
 	inode = btreefs_create_inode(oh->ot_handle, dir, attr->la_mode,
