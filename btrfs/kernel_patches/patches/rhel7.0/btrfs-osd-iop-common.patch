@@ -2,7 +2,7 @@ Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
 ===================================================================
 --- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/btrfs_inode.h
 +++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
-@@ -320,4 +320,13 @@ void btrfs_add_transaction_callback(stru
+@@ -320,4 +320,20 @@ void btrfs_add_transaction_callback(stru
  				    struct btrfs_trans_cb_entry *callback);
  bool btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
  					struct btrfs_trans_cb_entry *callback);
@@ -15,6 +15,13 @@ Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
 +		    struct inode *inode,
 +		    struct qstr *d_name,
 +		    u64 *index);
++int btrfs_punch(struct inode *inode, struct btrfs_trans_handle *trans,
++		__u64 start, __u64 end);
++int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages);
++int btrfs_write_commit(struct inode *inode, struct page **pages, int nr_pages);
++int __btrfs_setxattr(struct btrfs_trans_handle *trans,
++		     struct inode *inode, const char *name,
++		     const void *value, size_t size, int flags);
  #endif
 Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/inode.c
 ===================================================================
@@ -146,7 +153,7 @@ Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/inode.c
  
  	btrfs_mark_buffer_dirty(path->nodes[0]);
  	btrfs_free_path(path);
-@@ -8639,6 +8648,171 @@ static int btrfs_permission(struct inode
+@@ -8639,6 +8648,349 @@ static int btrfs_permission(struct inode
  	return generic_permission(inode, mask);
  }
  
@@ -315,6 +322,433 @@ Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/inode.c
 +}
 +EXPORT_SYMBOL(btrfs_add_entry);
 +
++static int _btrfs_punch(struct inode *inode, struct btrfs_trans_handle *trans)
++{
++	struct btrfs_root *root = BTRFS_I(inode)->root;
++	struct btrfs_block_rsv *rsv;
++	int ret = 0;
++	u64 mask = root->sectorsize - 1;
++	u64 min_size = btrfs_calc_trunc_metadata_size(root, 1);
++
++	ret = btrfs_wait_ordered_range(inode, inode->i_size & (~mask),
++				       (u64)-1);
++	if (ret)
++		return ret;
++
++	/*
++	 * Yes ladies and gentelment, this is indeed ugly.  The fact is we have
++	 * 3 things going on here
++	 *
++	 * 1) We need to reserve space for our orphan item and the space to
++	 * delete our orphan item.  Lord knows we don't want to have a dangling
++	 * orphan item because we didn't reserve space to remove it.
++	 *
++	 * 2) We need to reserve space to update our inode.
++	 *
++	 * 3) We need to have something to cache all the space that is going to
++	 * be free'd up by the truncate operation, but also have some slack
++	 * space reserved in case it uses space during the truncate (thank you
++	 * very much snapshotting).
++	 *
++	 * And we need these to all be seperate.  The fact is we can use alot of
++	 * space doing the truncate, and we have no earthly idea how much space
++	 * we will use, so we need the truncate reservation to be seperate so it
++	 * doesn't end up using space reserved for updating the inode or
++	 * removing the orphan item.  We also need to be able to stop the
++	 * transaction and start a new one, which means we need to be able to
++	 * update the inode several times, and we have no idea of knowing how
++	 * many times that will be, so we can't just reserve 1 item for the
++	 * entirety of the opration, so that has to be done seperately as well.
++	 * Then there is the orphan item, which does indeed need to be held on
++	 * to for the whole operation, and we need nobody to touch this reserved
++	 * space except the orphan code.
++	 *
++	 * So that leaves us with
++	 *
++	 * 1) root->orphan_block_rsv - for the orphan deletion.
++	 * 2) rsv - for the truncate reservation, which we will steal from the
++	 * transaction reservation.
++	 * 3) fs_info->trans_block_rsv - this will have 1 items worth left for
++	 * updating the inode.
++	 */
++	rsv = btrfs_alloc_block_rsv(root, BTRFS_BLOCK_RSV_TEMP);
++	if (!rsv)
++		return -ENOMEM;
++	rsv->size = min_size;
++	rsv->failfast = 1;
++
++	/* Migrate the slack space for the truncate to our reserve */
++	ret = btrfs_block_rsv_migrate(&root->fs_info->trans_block_rsv, rsv,
++				      min_size);
++	BUG_ON(ret);
++
++	/*
++	 * setattr is responsible for setting the ordered_data_close flag,
++	 * but that is only tested during the last file release.  That
++	 * could happen well after the next commit, leaving a great big
++	 * window where new writes may get lost if someone chooses to write
++	 * to this file after truncating to zero
++	 *
++	 * The inode doesn't have any dirty data here, and so if we commit
++	 * this is a noop.  If someone immediately starts writing to the inode
++	 * it is very likely we'll catch some of their writes in this
++	 * transaction, and the commit will find this file on the ordered
++	 * data list with good things to send down.
++	 *
++	 * This is a best effort solution, there is still a window where
++	 * using truncate to replace the contents of the file will
++	 * end up with a zero length file after a crash.
++	 */
++	if (inode->i_size == 0 && test_bit(BTRFS_INODE_ORDERED_DATA_CLOSE,
++					   &BTRFS_I(inode)->runtime_flags))
++		btrfs_add_ordered_operation(trans, root, inode);
++
++	/*
++	 * So if we truncate and then write and fsync we normally would just
++	 * write the extents that changed, which is a problem if we need to
++	 * first truncate that entire inode.  So set this flag so we write out
++	 * all of the extents in the inode to the sync log so we're completely
++	 * safe.
++	 */
++	set_bit(BTRFS_INODE_NEEDS_FULL_SYNC, &BTRFS_I(inode)->runtime_flags);
++	trans->block_rsv = rsv;
++
++	while (1) {
++		ret = btrfs_truncate_inode_items(trans, root, inode,
++						 inode->i_size,
++						 BTRFS_EXTENT_DATA_KEY);
++		if (ret != -ENOSPC) {
++			break;
++		}
++
++		trans->block_rsv = &root->fs_info->trans_block_rsv;
++		ret = btrfs_update_inode(trans, root, inode);
++		if (ret) {
++			break;
++		}
++
++		btrfs_btree_balance_dirty(root);
++
++		ret = btrfs_block_rsv_migrate(&root->fs_info->trans_block_rsv,
++					      rsv, min_size);
++		BUG_ON(ret);	/* shouldn't happen */
++		trans->block_rsv = rsv;
++	}
++
++	if (ret == 0 && inode->i_nlink > 0) {
++		trans->block_rsv = root->orphan_block_rsv;
++		btrfs_orphan_del(trans, inode);
++	}
++
++	trans->block_rsv = &root->fs_info->trans_block_rsv;
++	ret = btrfs_update_inode(trans, root, inode);
++
++	btrfs_btree_balance_dirty(root);
++
++	btrfs_free_block_rsv(root, rsv);
++
++	return ret;
++}
++
++int btrfs_punch(struct inode *inode, struct btrfs_trans_handle *trans,
++		__u64 start, __u64 end)
++{
++	int ret;
++
++	BUG_ON(end != 0xffffffffffffffffULL);
++
++	/*
++	 * We're truncating a file that used to have good data down to
++	 * zero. Make sure it gets into the ordered flush list so that
++	 * any new writes get down to disk quickly.
++	 */
++	if (start == 0)
++		set_bit(BTRFS_INODE_ORDERED_DATA_CLOSE,
++			&BTRFS_I(inode)->runtime_flags);
++
++	/*
++	 * We need to do this in case we fail at _any_ point during the
++	 * actual truncate.  Once we do the truncate_setsize we could
++	 * invalidate pages which forces any outstanding ordered io to
++	 * be instantly completed which will give us extents that need
++	 * to be truncated.  If we fail to get an orphan inode down we
++	 * could have left over extents that were never meant to live,
++	 * so we need to garuntee from this point on that everything
++	 * will be consistent.
++	 */
++	ret = btrfs_orphan_add(trans, inode);
++
++	/* we don't support swapfiles, so vmtruncate shouldn't fail */
++	truncate_setsize(inode, start);
++	/* Disable nonlocked read DIO to avoid the end less truncate */
++	btrfs_inode_block_unlocked_dio(inode);
++	inode_dio_wait(inode);
++	btrfs_inode_resume_unlocked_dio(inode);
++
++	ret = _btrfs_punch(inode, trans);
++	if (ret && inode->i_nlink) {
++		/*
++		 * failed to truncate, disk_i_size is only adjusted down
++		 * as we remove extents, so it should represent the true
++		 * size of the inode, so reset the in memory size and
++		 * delete our orphan entry.
++		 */
++		i_size_write(inode, BTRFS_I(inode)->disk_i_size);
++		ret = btrfs_orphan_del(trans, inode);
++	}
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_punch);
++
  const struct inode_operations btrfs_dir_inode_operations = {
  	.getattr	= btrfs_getattr,
  	.lookup		= btrfs_lookup,
+Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/extent_io.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/extent_io.c
++++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/extent_io.c
+@@ -2739,7 +2739,8 @@ static int __do_readpage(struct extent_i
+ 			 get_extent_t *get_extent,
+ 			 struct extent_map **em_cached,
+ 			 struct bio **bio, int mirror_num,
+-			 unsigned long *bio_flags, int rw)
++			 unsigned long *bio_flags, int rw,
++			 int keep_page)
+ {
+ 	struct inode *inode = page->mapping->host;
+ 	u64 start = page_offset(page);
+@@ -2902,7 +2903,8 @@ out:
+ 	if (!nr) {
+ 		if (!PageError(page))
+ 			SetPageUptodate(page);
+-		unlock_page(page);
++		if (!keep_page)
++			unlock_page(page);
+ 	}
+ 	return 0;
+ }
+@@ -2913,7 +2915,8 @@ static inline void __do_contiguous_readp
+ 					     get_extent_t *get_extent,
+ 					     struct extent_map **em_cached,
+ 					     struct bio **bio, int mirror_num,
+-					     unsigned long *bio_flags, int rw)
++					     unsigned long *bio_flags, int rw,
++					     int keep_page)
+ {
+ 	struct inode *inode;
+ 	struct btrfs_ordered_extent *ordered;
+@@ -2933,8 +2936,9 @@ static inline void __do_contiguous_readp
+ 
+ 	for (index = 0; index < nr_pages; index++) {
+ 		__do_readpage(tree, pages[index], get_extent, em_cached, bio,
+-			      mirror_num, bio_flags, rw);
+-		page_cache_release(pages[index]);
++			      mirror_num, bio_flags, rw, keep_page);
++		if (!keep_page)
++			page_cache_release(pages[index]);
+ 	}
+ }
+ 
+@@ -2943,7 +2947,8 @@ static void __extent_readpages(struct ex
+ 			       int nr_pages, get_extent_t *get_extent,
+ 			       struct extent_map **em_cached,
+ 			       struct bio **bio, int mirror_num,
+-			       unsigned long *bio_flags, int rw)
++			       unsigned long *bio_flags, int rw,
++			       int keep_page)
+ {
+ 	u64 start = 0;
+ 	u64 end = 0;
+@@ -2964,7 +2969,7 @@ static void __extent_readpages(struct ex
+ 						  index - first_index, start,
+ 						  end, get_extent, em_cached,
+ 						  bio, mirror_num, bio_flags,
+-						  rw);
++						  rw, keep_page);
+ 			start = page_start;
+ 			end = start + PAGE_CACHE_SIZE - 1;
+ 			first_index = index;
+@@ -2975,7 +2980,7 @@ static void __extent_readpages(struct ex
+ 		__do_contiguous_readpages(tree, &pages[first_index],
+ 					  index - first_index, start,
+ 					  end, get_extent, em_cached, bio,
+-					  mirror_num, bio_flags, rw);
++					  mirror_num, bio_flags, rw, keep_page);
+ }
+ 
+ static int __extent_read_full_page(struct extent_io_tree *tree,
+@@ -3001,7 +3006,7 @@ static int __extent_read_full_page(struc
+ 	}
+ 
+ 	ret = __do_readpage(tree, page, get_extent, NULL, bio, mirror_num,
+-			    bio_flags, rw);
++			    bio_flags, rw, 0);
+ 	return ret;
+ }
+ 
+@@ -3027,7 +3032,7 @@ int extent_read_full_page_nolock(struct
+ 	int ret;
+ 
+ 	ret = __do_readpage(tree, page, get_extent, NULL, &bio, mirror_num,
+-				      &bio_flags, READ);
++				      &bio_flags, READ, 0);
+ 	if (bio)
+ 		ret = submit_one_bio(READ, bio, mirror_num, bio_flags);
+ 	return ret;
+@@ -3050,7 +3055,7 @@ static noinline void update_nr_written(s
+  * and the end_io handler clears the writeback ranges
+  */
+ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+-			      void *data)
++			      void *data, int keep_page)
+ {
+ 	struct inode *inode = page->mapping->host;
+ 	struct extent_page_data *epd = data;
+@@ -3097,7 +3102,8 @@ static int __extent_writepage(struct pag
+ 	if (page->index > end_index ||
+ 	   (page->index == end_index && !pg_offset)) {
+ 		page->mapping->a_ops->invalidatepage(page, 0);
+-		unlock_page(page);
++		if (!keep_page)
++			unlock_page(page);
+ 		return 0;
+ 	}
+ 
+@@ -3191,7 +3197,8 @@ static int __extent_writepage(struct pag
+ 			else
+ 				redirty_page_for_writepage(wbc, page);
+ 			update_nr_written(page, wbc, nr_written);
+-			unlock_page(page);
++			if (!keep_page)
++				unlock_page(page);
+ 			ret = 0;
+ 			goto done_unlocked;
+ 		}
+@@ -3310,7 +3317,8 @@ done:
+ 		set_page_writeback(page);
+ 		end_page_writeback(page);
+ 	}
+-	unlock_page(page);
++	if (!keep_page)
++		unlock_page(page);
+ 
+ done_unlocked:
+ 
+@@ -3785,7 +3793,7 @@ int extent_write_full_page(struct extent
+ 		.bio_flags = 0,
+ 	};
+ 
+-	ret = __extent_writepage(page, wbc, &epd);
++	ret = __extent_writepage(page, wbc, &epd, 0);
+ 
+ 	flush_epd_write_bio(&epd);
+ 	return ret;
+@@ -3819,7 +3827,7 @@ int extent_write_locked_range(struct ext
+ 	while (start <= end) {
+ 		page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
+ 		if (clear_page_dirty_for_io(page))
+-			ret = __extent_writepage(page, &wbc_writepages, &epd);
++			ret = __extent_writepage(page, &wbc_writepages, &epd, 0);
+ 		else {
+ 			if (tree->ops && tree->ops->writepage_end_io_hook)
+ 				tree->ops->writepage_end_io_hook(page, start,
+@@ -3835,6 +3843,12 @@ int extent_write_locked_range(struct ext
+ 	return ret;
+ }
+ 
++static int extent_writepage(struct page *page, struct writeback_control *wbc,
++			    void *data)
++{
++	return __extent_writepage(page, wbc, data, 0);
++}
++
+ int extent_writepages(struct extent_io_tree *tree,
+ 		      struct address_space *mapping,
+ 		      get_extent_t *get_extent,
+@@ -3851,7 +3865,7 @@ int extent_writepages(struct extent_io_t
+ 	};
+ 
+ 	ret = extent_write_cache_pages(tree, mapping, wbc,
+-				       __extent_writepage, &epd,
++				       extent_writepage, &epd,
+ 				       flush_write_bio);
+ 	flush_epd_write_bio(&epd);
+ 	return ret;
+@@ -3885,12 +3899,12 @@ int extent_readpages(struct extent_io_tr
+ 		if (nr < ARRAY_SIZE(pagepool))
+ 			continue;
+ 		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
+-				   &bio, 0, &bio_flags, READ);
++				   &bio, 0, &bio_flags, READ, 0);
+ 		nr = 0;
+ 	}
+ 	if (nr)
+ 		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
+-				   &bio, 0, &bio_flags, READ);
++				   &bio, 0, &bio_flags, READ, 0);
+ 
+ 	if (em_cached)
+ 		free_extent_map(em_cached);
+@@ -5235,3 +5249,50 @@ int try_release_extent_buffer(struct pag
+ 
+ 	return release_extent_buffer(eb);
+ }
++
++int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages)
++{
++	struct extent_map *em_cached = NULL;
++	struct bio *bio = NULL;
++	unsigned long bio_flags = 0;
++
++	__extent_readpages(&BTRFS_I(inode)->io_tree,
++			   pages, nr_pages, btrfs_get_extent, &em_cached,
++			   &bio, 0, &bio_flags, READ, 1);
++
++	if (em_cached)
++		free_extent_map(em_cached);
++
++	if (bio)
++		return submit_one_bio(READ, bio, 0, bio_flags);
++	return 0;
++}
++EXPORT_SYMBOL(btrfs_read_prep);
++
++int btrfs_write_commit(struct inode *inode, struct page **pages, int nr_pages)
++{
++	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
++	struct writeback_control wbc = {
++		.sync_mode = WB_SYNC_NONE,
++		.nr_to_write = LONG_MAX,
++	};
++	struct extent_page_data epd = {
++		.bio = NULL,
++		.tree = tree,
++		.extent_locked = 0,
++		.sync_io = 0,
++		.bio_flags = 0,
++	};
++	int i;
++	int ret = 0;
++
++	for (i = 0; i < nr_pages; i++) {
++		ret = __extent_writepage(pages[i], &wbc, &epd, 1);
++		if (ret)
++			break;
++	}
++
++	flush_epd_write_bio(&epd);
++	return ret;
++}
++EXPORT_SYMBOL(btrfs_write_commit);
+Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/xattr.c
+===================================================================
+--- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/xattr.c
++++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/xattr.c
+@@ -215,6 +215,7 @@ out:
+ 	btrfs_end_transaction(trans, root);
+ 	return ret;
+ }
++EXPORT_SYMBOL(__btrfs_setxattr);
+ 
+ ssize_t btrfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
+ {
