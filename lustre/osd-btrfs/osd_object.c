@@ -720,6 +720,116 @@ static int osd_attr_get(const struct lu_env *env,
 	return 0;
 }
 
+static int osd_declare_attr_set(const struct lu_env *env,
+                                struct dt_object *dt,
+                                const struct lu_attr *attr,
+                                struct thandle *handle)
+{
+	struct osd_thandle *oh;
+	ENTRY;
+
+	LASSERT(handle != NULL);
+	oh = container_of0(handle, struct osd_thandle, ot_super);
+
+	osd_trans_declare_op(oh, osd_item_number[OTO_ATTR_SET_BASE]);
+
+	/* LIXI TODO: quota space for UID/GID change? */
+	RETURN(0);
+}
+
+static struct timespec *osd_inode_time(const struct lu_env *env,
+				       struct inode *inode, __u64 seconds)
+{
+	struct osd_thread_info	*oti = osd_oti_get(env);
+	struct timespec		*t   = &oti->oti_time;
+
+	t->tv_sec = seconds;
+	t->tv_nsec = 0;
+	*t = timespec_trunc(*t, inode->i_sb->s_time_gran);
+	return t;
+}
+
+static int osd_inode_setattr(const struct lu_env *env,
+			     struct inode *inode, const struct lu_attr *attr)
+{
+	__u64 bits = attr->la_valid;
+
+	/* Only allow set size for regular file */
+	if (!S_ISREG(inode->i_mode))
+		bits &= ~(LA_SIZE | LA_BLOCKS);
+
+	if (bits == 0)
+		return 0;
+
+        if (bits & LA_ATIME)
+                inode->i_atime  = *osd_inode_time(env, inode, attr->la_atime);
+        if (bits & LA_CTIME)
+                inode->i_ctime  = *osd_inode_time(env, inode, attr->la_ctime);
+        if (bits & LA_MTIME)
+                inode->i_mtime  = *osd_inode_time(env, inode, attr->la_mtime);
+        if (bits & LA_SIZE) {
+                BTREEFS_I(inode)->disk_i_size = attr->la_size;
+                i_size_write(inode, attr->la_size);
+        }
+
+#if 0
+        /* OSD should not change "i_blocks" which is used by quota.
+         * "i_blocks" should be changed by ldiskfs only. */
+        if (bits & LA_BLOCKS)
+                inode->i_blocks = attr->la_blocks;
+#endif
+	if (bits & LA_MODE)
+		inode->i_mode = (inode->i_mode & S_IFMT) |
+				(attr->la_mode & ~S_IFMT);
+	if (bits & LA_UID)
+		i_uid_write(inode, attr->la_uid);
+	if (bits & LA_GID)
+		i_gid_write(inode, attr->la_gid);
+	if (bits & LA_NLINK)
+		set_nlink(inode, attr->la_nlink);
+	if (bits & LA_RDEV)
+		inode->i_rdev = attr->la_rdev;
+
+        if (bits & LA_FLAGS) {
+                /* always keep S_NOCMTIME */
+                inode->i_flags = ll_ext_to_inode_flags(attr->la_flags) |
+                                 S_NOCMTIME;
+        }
+        return 0;
+}
+
+static int osd_attr_set(const struct lu_env *env,
+			struct dt_object *dt,
+			const struct lu_attr *attr,
+			struct thandle *handle)
+{
+	struct osd_object *obj = osd_dt_obj(dt);
+	struct inode      *inode;
+	int rc;
+
+	LASSERT(handle != NULL);
+	LASSERT(dt_object_exists(dt));
+	LASSERT(!dt_object_remote(dt));
+	LASSERT(osd_invariant(obj));
+
+        inode = obj->oo_inode;
+
+#ifdef LIXI
+	rc = osd_quota_transfer(inode, attr);
+	if (rc)
+		return rc;
+#endif /* LIXI */
+
+	spin_lock(&obj->oo_guard);
+	rc = osd_inode_setattr(env, inode, attr);
+	spin_unlock(&obj->oo_guard);
+
+	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
+        if (!rc)
+		btreefs_dirty_inode(inode);
+        return rc;
+}
+
 static const struct dt_object_operations osd_obj_ops = {
 #ifdef LIXI
 	.do_read_lock         = osd_object_read_lock,
@@ -754,8 +864,8 @@ static const struct dt_object_operations osd_obj_ops = {
 	.do_write_unlock      = osd_object_write_unlock,
 	.do_write_locked      = osd_object_write_locked,
 	.do_attr_get          = osd_attr_get,
-	.do_declare_attr_set  = NULL,
-	.do_attr_set          = NULL,
+	.do_declare_attr_set  = osd_declare_attr_set,
+	.do_attr_set          = osd_attr_set,
 	.do_ah_init           = NULL,
 	.do_declare_create    = osd_declare_object_create,
 	.do_create            = osd_object_create,
@@ -766,9 +876,9 @@ static const struct dt_object_operations osd_obj_ops = {
 	.do_ref_add           = osd_object_ref_add,
 	.do_declare_ref_del   = osd_declare_object_ref_del,
 	.do_ref_del           = osd_object_ref_del,
-	.do_xattr_get         = NULL,
+	.do_xattr_get         = osd_xattr_get,
 	.do_declare_xattr_set = osd_declare_xattr_set,
-	.do_xattr_set         = NULL,
+	.do_xattr_set         = osd_xattr_set,
 	.do_declare_xattr_del = NULL,
 	.do_xattr_del         = NULL,
 	.do_xattr_list        = NULL,

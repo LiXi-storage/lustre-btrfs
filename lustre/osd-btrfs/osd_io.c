@@ -37,6 +37,8 @@
  * Author: Li Xi <lixi@ddn.com>
  */
 
+#include <linux/quotaops.h>
+#include <libcfs/libcfs.h>
 #include "osd_internal.h"
 
 static ssize_t osd_declare_write(const struct lu_env *env, struct dt_object *dt,
@@ -104,6 +106,442 @@ static ssize_t osd_read(const struct lu_env *env, struct dt_object *dt,
         return rc;
 }
 
+static int osd_declare_punch(const struct lu_env *env, struct dt_object *dt,
+                             __u64 start, __u64 end, struct thandle *th)
+{
+	struct osd_thandle *oh;
+	ENTRY;
+
+	LASSERT(th);
+	oh = container_of(th, struct osd_thandle, ot_super);
+
+	osd_trans_declare_op(oh, osd_item_number[OTO_XATTR_SET]);
+
+	RETURN(0);
+}
+
+static int osd_punch(const struct lu_env *env, struct dt_object *dt,
+		     __u64 start, __u64 end, struct thandle *th)
+{
+	struct osd_thandle *oh;
+	struct osd_object  *obj = osd_dt_obj(dt);
+	struct inode       *inode = obj->oo_inode;
+	int		   rc = 0;
+	ENTRY;
+
+	LASSERT(end == OBD_OBJECT_EOF);
+	LASSERT(dt_object_exists(dt));
+	LASSERT(osd_invariant(obj));
+	LASSERT(inode != NULL);
+	ll_vfs_dq_init(inode);
+
+	LASSERT(th);
+	oh = container_of(th, struct osd_thandle, ot_super);
+
+	i_size_write(inode, start);
+	ll_truncate_pagecache(inode, start);
+	/* Btrfs does not have i_op->truncate() anyway */
+	btreefs_punch(inode, oh->ot_handle, start, end);
+
+	/*
+	 * For a partial-page truncate, flush the page to disk immediately to
+	 * avoid data corruption during direct disk write.  b=17397
+	 */
+	if ((start & ~PAGE_MASK) != 0)
+                rc = filemap_fdatawrite_range(inode->i_mapping, start, start+1);
+
+#ifdef LIXI
+        h = journal_current_handle();
+        LASSERT(h != NULL);
+        LASSERT(h == oh->ot_handle);
+
+        if (tid != h->h_transaction->t_tid) {
+                int credits = oh->ot_credits;
+                /*
+                 * transaction has changed during truncate
+                 * we need to restart the handle with our credits
+                 */
+                if (h->h_buffer_credits < credits) {
+                        if (ldiskfs_journal_extend(h, credits))
+                                rc2 = ldiskfs_journal_restart(h, credits);
+                }
+        }
+
+        RETURN(rc == 0 ? rc2 : rc);
+#endif /* LIXI */
+
+	RETURN(rc);
+}
+
+static int osd_map_remote_to_local(loff_t offset, ssize_t len, int *nrpages,
+                                   struct niobuf_local *lnb)
+{
+	   ENTRY;
+
+	*nrpages = 0;
+
+	while (len > 0) {
+		int poff = offset & (PAGE_CACHE_SIZE - 1);
+		int plen = PAGE_CACHE_SIZE - poff;
+
+		if (plen > len)
+			plen = len;
+		lnb->lnb_file_offset = offset;
+		lnb->lnb_page_offset = poff;
+		lnb->lnb_len = plen;
+		/* lnb->lnb_flags = rnb->rnb_flags; */
+		lnb->lnb_flags = 0;
+		lnb->lnb_page = NULL;
+		lnb->lnb_rc = 0;
+
+		LASSERTF(plen <= len, "plen %u, len %lld\n", plen,
+			 (long long) len);
+		offset += plen;
+		len -= plen;
+		lnb++;
+		(*nrpages)++;
+	}
+
+	RETURN(0);
+}
+
+struct page *osd_get_page(struct dt_object *dt, loff_t offset, int rw)
+{
+	struct inode      *inode = osd_dt_obj(dt)->oo_inode;
+#ifdef LIXI
+	struct osd_device *d = osd_obj2dev(osd_dt_obj(dt));
+#endif /* LIXI */
+	struct page       *page;
+
+	LASSERT(inode);
+
+	page = find_or_create_page(inode->i_mapping, offset >> PAGE_CACHE_SHIFT,
+				   GFP_NOFS | __GFP_HIGHMEM);
+#ifdef LIXI
+	if (unlikely(page == NULL))
+		lprocfs_counter_add(d->od_stats, LPROC_OSD_NO_PAGE, 1);
+#endif /* LIXI */
+
+	return page;
+}
+
+/*
+ * there are following "locks":
+ * journal_start
+ * i_mutex
+ * page lock
+
+ * osd write path
+    * lock page(s)
+    * journal_start
+    * truncate_sem
+
+ * ext4 vmtruncate:
+    * lock pages, unlock
+    * journal_start
+    * lock partial page
+    * i_data_sem
+
+*/
+static int osd_bufs_get(const struct lu_env *env, struct dt_object *d, loff_t pos,
+                 ssize_t len, struct niobuf_local *lnb, int rw)
+{
+        struct osd_object   *obj    = osd_dt_obj(d);
+        int npages, i, rc = 0;
+
+        LASSERT(obj->oo_inode);
+
+        osd_map_remote_to_local(pos, len, &npages, lnb);
+
+        for (i = 0; i < npages; i++, lnb++) {
+		lnb->lnb_page = osd_get_page(d, lnb->lnb_file_offset, rw);
+		if (lnb->lnb_page == NULL)
+			GOTO(cleanup, rc = -ENOMEM);
+
+		/* DLM locking protects us from write and truncate competing
+		 * for same region, but truncate can leave dirty page in the
+		 * cache. it's possible the writeout on a such a page is in
+		 * progress when we access it. it's also possible that during
+		 * this writeout we put new (partial) data, but then won't
+		 * be able to proceed in filter_commitrw_write(). thus let's
+		 * just wait for writeout completion, should be rare enough.
+		 * -bzzz */
+		wait_on_page_writeback(lnb->lnb_page);
+		BUG_ON(PageWriteback(lnb->lnb_page));
+
+                lu_object_get(&d->do_lu);
+        }
+        rc = i;
+
+cleanup:
+        RETURN(rc);
+}
+
+static int osd_bufs_put(const struct lu_env *env, struct dt_object *dt,
+			struct niobuf_local *lnb, int npages)
+{
+	int i;
+
+	for (i = 0; i < npages; i++) {
+		if (lnb[i].lnb_page == NULL)
+			continue;
+		LASSERT(PageLocked(lnb[i].lnb_page));
+		unlock_page(lnb[i].lnb_page);
+		page_cache_release(lnb[i].lnb_page);
+		lu_object_put(env, &dt->do_lu);
+		lnb[i].lnb_page = NULL;
+	}
+
+	RETURN(0);
+}
+
+static int __osd_init_iobuf(struct osd_device *d, struct osd_iobuf *iobuf,
+			    int rw, int line, int pages)
+{
+	int i;
+	LASSERT(pages <= PTLRPC_MAX_BRW_PAGES);
+
+	iobuf->dr_npages = 0;
+
+	/* start with 1MB for 4K blocks */
+	i = 256;
+	while (i <= PTLRPC_MAX_BRW_PAGES && i < pages)
+		i <<= 1;
+
+	CDEBUG(D_OTHER, "realloc %u for %u (%u) pages\n",
+	       (unsigned)(pages * sizeof(iobuf->dr_pages[0])), i, pages);
+	pages = i;
+	iobuf->dr_max_pages = 0;
+
+	lu_buf_realloc(&iobuf->dr_pg_buf, pages * sizeof(iobuf->dr_pages[0]));
+	iobuf->dr_pages = iobuf->dr_pg_buf.lb_buf;
+	if (unlikely(iobuf->dr_pages == NULL))
+		return -ENOMEM;
+
+	iobuf->dr_max_pages = pages;
+
+	return 0;
+}
+#define osd_init_iobuf(dev, iobuf, rw, pages) \
+	__osd_init_iobuf(dev, iobuf, rw, __LINE__, pages)
+
+static void osd_iobuf_add_page(struct osd_iobuf *iobuf, struct page *page)
+{
+        LASSERT(iobuf->dr_npages < iobuf->dr_max_pages);
+        iobuf->dr_pages[iobuf->dr_npages++] = page;
+}
+
+static int osd_read_prep(const struct lu_env *env, struct dt_object *dt,
+                         struct niobuf_local *lnb, int npages)
+{
+	struct osd_thread_info *oti = osd_oti_get(env);
+	 struct inode *inode = osd_dt_obj(dt)->oo_inode;
+	struct osd_device *osd = osd_obj2dev(osd_dt_obj(dt));
+	struct osd_iobuf *iobuf = &oti->oti_iobuf;
+	int rc, i;
+	ENTRY;
+
+	rc = osd_init_iobuf(osd, iobuf, 0, npages);
+	if (unlikely(rc != 0))
+		RETURN(rc);
+
+	for (i = 0; i < npages; i++) {
+		if (i_size_read(inode) <= lnb[i].lnb_file_offset)
+		/* If there's no more data, abort early.
+		 * lnb->lnb_rc == 0, so it's easy to detect later. */
+		break;
+
+		if (i_size_read(inode) <
+		    lnb[i].lnb_file_offset + lnb[i].lnb_len - 1)
+			lnb[i].lnb_rc = i_size_read(inode) -
+				lnb[i].lnb_file_offset;
+		else
+			lnb[i].lnb_rc = lnb[i].lnb_len;
+
+		if (!PageUptodate(lnb[i].lnb_page))
+			osd_iobuf_add_page(iobuf, lnb[i].lnb_page);
+
+		/* LIXI TODO: Read cache support, now always cache data */
+#ifdef LIXI
+		generic_error_remove_page(inode->i_mapping,
+					  lnb[i].lnb_page);
+#endif /* LIXI */
+	}
+
+	if (iobuf->dr_npages)
+		rc = btreefs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
+
+	RETURN(rc);
+}
+
+static int osd_write_prep(const struct lu_env *env, struct dt_object *dt,
+                          struct niobuf_local *lnb, int npages)
+{
+	struct osd_thread_info *oti   = osd_oti_get(env);
+	struct osd_iobuf       *iobuf = &oti->oti_iobuf;
+	struct inode           *inode = osd_dt_obj(dt)->oo_inode;
+	struct osd_device      *osd   = osd_obj2dev(osd_dt_obj(dt));
+	ssize_t                 isize;
+	__s64                   maxidx;
+	int                     rc = 0;
+	int                     i;
+
+	LASSERT(inode);
+
+	rc = osd_init_iobuf(osd, iobuf, 0, npages);
+	if (unlikely(rc != 0))
+		RETURN(rc);
+
+	isize = i_size_read(inode);
+	maxidx = ((isize + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT) - 1;
+
+	for (i = 0; i < npages; i++) {
+
+		/* LIXI TODO: Write cache support, now always cache data */
+#ifdef LIXI
+		generic_error_remove_page(inode->i_mapping,
+					  lnb[i].lnb_page);
+#endif /* LIXI */
+
+		/*
+		 * till commit the content of the page is undefined
+		 * we'll set it uptodate once bulk is done. otherwise
+		 * subsequent reads can access non-stable data
+		 */
+		ClearPageUptodate(lnb[i].lnb_page);
+
+		if (lnb[i].lnb_len == PAGE_CACHE_SIZE)
+			continue;
+
+		if (maxidx >= lnb[i].lnb_page->index) {
+			osd_iobuf_add_page(iobuf, lnb[i].lnb_page);
+		} else {
+			long off;
+			char *p = kmap(lnb[i].lnb_page);
+
+			off = lnb[i].lnb_page_offset;
+			if (off)
+				memset(p, 0, off);
+			off = (lnb[i].lnb_page_offset + lnb[i].lnb_len) &
+			      ~PAGE_MASK;
+			if (off)
+				memset(p + off, 0, PAGE_CACHE_SIZE - off);
+			kunmap(lnb[i].lnb_page);
+		}
+	}
+
+	if (iobuf->dr_npages)
+		rc = btreefs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
+
+        RETURN(rc);
+}
+
+static int osd_declare_write_commit(const struct lu_env *env,
+                                    struct dt_object *dt,
+                                    struct niobuf_local *lnb, int npages,
+                                    struct thandle *handle)
+{
+	struct osd_thandle      *oh;
+	int			 rc = 0;
+	long long		 space = npages * PAGE_CACHE_SIZE;
+	ENTRY;
+
+	LASSERT(handle != NULL);
+	oh = container_of0(handle, struct osd_thandle, ot_super);
+	LASSERT(oh->ot_handle == NULL);
+
+	osd_trans_declare_op(oh, space / 4096);
+
+	RETURN(rc);
+}
+
+/* Check if a block is allocated or not */
+static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
+                            struct niobuf_local *lnb, int npages,
+                            struct thandle *thandle)
+{
+        struct osd_thread_info *oti = osd_oti_get(env);
+        struct osd_iobuf *iobuf = &oti->oti_iobuf;
+        struct inode *inode = osd_dt_obj(dt)->oo_inode;
+        struct osd_device  *osd = osd_obj2dev(osd_dt_obj(dt));
+        loff_t isize;
+        loff_t current_isize = i_size_read(inode);
+        int rc = 0, i;
+
+        LASSERT(inode);
+
+	rc = osd_init_iobuf(osd, iobuf, 1, npages);
+	if (unlikely(rc != 0))
+		RETURN(rc);
+
+	isize = i_size_read(inode);
+	ll_vfs_dq_init(inode);
+
+        for (i = 0; i < npages; i++) {
+		if (lnb[i].lnb_rc) { /* ENOSPC, network RPC error, etc. */
+			CDEBUG(D_INODE, "Skipping [%d] == %d\n", i,
+			       lnb[i].lnb_rc);
+			LASSERT(lnb[i].lnb_page);
+			generic_error_remove_page(inode->i_mapping,
+						  lnb[i].lnb_page);
+			continue;
+		}
+
+		LASSERT(PageLocked(lnb[i].lnb_page));
+		LASSERT(!PageWriteback(lnb[i].lnb_page));
+
+		if (lnb[i].lnb_file_offset + lnb[i].lnb_len > isize)
+			isize = lnb[i].lnb_file_offset + lnb[i].lnb_len;
+
+		/*
+		 * Since write and truncate are serialized by oo_sem, even
+		 * partial-page truncate should not leave dirty pages in the
+		 * page cache.
+		 */
+		LASSERT(!PageDirty(lnb[i].lnb_page));
+
+		SetPageUptodate(lnb[i].lnb_page);
+
+		osd_iobuf_add_page(iobuf, lnb[i].lnb_page);
+        }
+
+#ifdef LIXI
+        if (OBD_FAIL_CHECK(OBD_FAIL_OST_MAPBLK_ENOSPC)) {
+                rc = -ENOSPC;
+        }
+#endif /* LIXI */
+	/*
+	 * __extent_writepage() requires that the page indexes
+	 * are in the range of inode size.
+	 */
+	if (isize > current_isize)
+		i_size_write(inode, isize);
+
+	if (iobuf->dr_npages > 0)
+		rc = btreefs_write_commit(inode, iobuf->dr_pages, iobuf->dr_npages);
+
+        if (likely(rc == 0)) {
+                if (isize > current_isize) {
+                        BTREEFS_I(inode)->disk_i_size = isize;
+                        /* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
+			btreefs_dirty_inode(inode);
+                }      
+	} else {
+		/* Recover the inode size if write fails */
+		i_size_write(inode, current_isize);
+                /* if write fails, we should drop pages from the cache */
+                for (i = 0; i < npages; i++) {
+			if (lnb[i].lnb_page == NULL)
+				continue;
+			LASSERT(PageLocked(lnb[i].lnb_page));
+			generic_error_remove_page(inode->i_mapping,
+						  lnb[i].lnb_page);
+		}
+	}
+
+	RETURN(rc);
+}
+
 /*
  * in some cases we may need declare methods for objects being created
  * e.g., when we create symlink
@@ -113,7 +551,6 @@ const struct dt_body_operations osd_body_ops_new = {
 };
 
 const struct dt_body_operations osd_body_ops = {
-#ifdef LIXI
 	.dbo_read                 = osd_read,
 	.dbo_declare_write        = osd_declare_write,
 	.dbo_write                = osd_write,
@@ -125,19 +562,6 @@ const struct dt_body_operations osd_body_ops = {
 	.dbo_read_prep            = osd_read_prep,
 	.dbo_declare_punch        = osd_declare_punch,
 	.dbo_punch                = osd_punch,
-	.dbo_fiemap_get           = osd_fiemap_get,
-#else /* LIXI */
-	.dbo_read                 = osd_read,
-	.dbo_declare_write        = osd_declare_write,
-	.dbo_write                = osd_write,
-	.dbo_bufs_get             = NULL,
-	.dbo_bufs_put             = NULL,
-	.dbo_write_prep           = NULL,
-	.dbo_declare_write_commit = NULL,
-	.dbo_write_commit         = NULL,
-	.dbo_read_prep            = NULL,
-	.dbo_declare_punch        = NULL,
-	.dbo_punch                = NULL,
 	.dbo_fiemap_get           = NULL,
-#endif /* LIXI */
+	//.dbo_fiemap_get           = osd_fiemap_get,
 };
