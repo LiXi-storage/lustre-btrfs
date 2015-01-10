@@ -152,6 +152,13 @@ struct osd_it_index {
 	struct osd_object	*oii_obj;
 };
 
+struct osd_iobuf {
+	int		  dr_max_pages;
+	int		  dr_npages;
+	struct page	**dr_pages;
+	struct lu_buf	  dr_pg_buf;
+};
+
 struct osd_thread_info {
 	const struct lu_env	 *oti_env;
 	struct kstatfs		  oti_ksfs;
@@ -175,6 +182,12 @@ struct osd_thread_info {
 	struct ost_id		  oti_ostid;
 	unsigned int		  oti_it_inline:1;
 	struct osd_it_index	  oti_it_index;
+	/*
+	 * XXX temporary: for ->i_op calls.
+	*/
+	struct timespec		  oti_time;
+	/** 0-copy IO */
+	struct osd_iobuf	  oti_iobuf;
 };
 
 struct osd_thandle {
@@ -335,6 +348,12 @@ void osd_get_name_from_fid(const struct lu_fid *fid, char *buf);
 int osd_declare_xattr_set(const struct lu_env *env, struct dt_object *dt,
 			  const struct lu_buf *buf, const char *name,
 			  int fl, struct thandle *handle);
+int osd_xattr_get(const struct lu_env *env, struct dt_object *dt,
+		  struct lu_buf *buf, const char *name,
+		  struct lustre_capa *capa);
+int osd_xattr_set(const struct lu_env *env, struct dt_object *dt,
+		  const struct lu_buf *buf, const char *name, int fl,
+		  struct thandle *handle, struct lustre_capa *capa);
 
 int osd_oi_init(const struct lu_env *env, struct osd_device *o);
 struct osd_obj_seq *osd_seq_load(struct osd_thread_info *info,
