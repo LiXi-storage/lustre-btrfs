@@ -40,7 +40,7 @@
 #include <lustre_fid.h>
 #include <lustre_disk.h>
 #include "osd_internal.h"
-#include <btrfs/btreefs_inode.h>
+#include <btrfs/lbtrfs_inode.h>
 #include <btrfs/object-index.h>
 
 static inline int fid_is_fs_root(const struct lu_fid *fid)
@@ -65,8 +65,8 @@ osd_oi_lookup(const struct lu_env *env, struct osd_device *osd,
 
 	if (fid_is_fs_root(fid)) {
 		inode = osd_sb(osd)->s_root->d_inode;
-		osd_id_gen(id, btreefs_ino(inode),
-			   BTREEFS_I(inode)->generation);
+		osd_id_gen(id, lbtrfs_ino(inode),
+			   LBTRFS_I(inode)->generation);
 		return 0;
 	}
 
@@ -95,16 +95,16 @@ osd_oi_lookup(const struct lu_env *env, struct osd_device *osd,
 		if (is_bad_inode(inode))
 			GOTO(out, rc = -EIO);
 
-		osd_id_gen(id, btreefs_ino(inode),
-			   BTREEFS_I(inode)->generation);
+		osd_id_gen(id, lbtrfs_ino(inode),
+			   LBTRFS_I(inode)->generation);
 out:
 		/* if dentry is accessible after insert it
 		 * will still contain NULL inode, so don't keep it in cache */
 		d_invalidate(dentry);
 		dput(dentry);
 
-		rc2 = btreefs_oi_lookup_with_fid(osd_sb(osd),
-						(struct btreefs_lu_fid *)fid,
+		rc2 = lbtrfs_oi_lookup_with_fid(osd_sb(osd),
+						(struct lbtrfs_lu_fid *)fid,
 						&ino, &gen);
 		CERROR("osd_oi_lookup with dentry, fid "DFID", "
 		       "name = %s/%s, root inode %p,"
@@ -126,8 +126,8 @@ out:
 		return rc;
 	}
 
-	rc = btreefs_oi_lookup_with_fid(osd_sb(osd),
-					(struct btreefs_lu_fid *)fid,
+	rc = lbtrfs_oi_lookup_with_fid(osd_sb(osd),
+					(struct lbtrfs_lu_fid *)fid,
 					&id->oii_ino, &id->oii_gen);
 	CERROR("osd_oi_lookup, fid "DFID", rc = %d\n",
 	       PFID(fid), rc);
@@ -141,7 +141,7 @@ static struct inode *osd_iget_check(struct osd_thread_info *info,
 				    struct osd_inode_id *id)
 {
 	/* LIXI TODO: Check generation or so. */
-	return btreefs_inode_get(osd->od_mnt->mnt_sb, id->oii_ino);
+	return lbtrfs_inode_get(osd->od_mnt->mnt_sb, id->oii_ino);
 }
 
 int
@@ -301,20 +301,20 @@ static int
 osd_oi_create(const struct lu_env *env, struct osd_device *osd,
 	      struct lu_fid *fid, struct inode *inode)
 {
-	struct btreefs_trans_handle	*handle;
+	struct lbtrfs_trans_handle	*handle;
 	int			   	 rc = 0;
 	ENTRY;
 
-	handle = btreefs_trans_start(osd_sb(osd),
+	handle = lbtrfs_trans_start(osd_sb(osd),
 				     osd_item_number[OTO_INDEX_INSERT]);
 	if (IS_ERR(handle))
 		GOTO(out, rc = PTR_ERR(handle));
 
-	rc = btreefs_oi_insert(handle, osd_sb(osd),
-			       (struct btreefs_lu_fid *)fid,
-			       btreefs_ino(inode),
-			       BTREEFS_I(inode)->generation);
-	btreefs_trans_stop(osd_sb(osd), handle);
+	rc = lbtrfs_oi_insert(handle, osd_sb(osd),
+			      (struct lbtrfs_lu_fid *)fid,
+			      lbtrfs_ino(inode),
+			      LBTRFS_I(inode)->generation);
+	lbtrfs_trans_stop(osd_sb(osd), handle);
 out:
 	RETURN(rc);
 }
@@ -328,9 +328,9 @@ osd_oi_find_or_create(const struct lu_env *env, struct osd_device *osd,
 	int			rc;
 	ENTRY;
 
-	rc = btreefs_oi_lookup_with_fid(osd_sb(osd),
-					(struct btreefs_lu_fid *)fid,
-					&inode_id.oii_ino, &inode_id.oii_gen);
+	rc = lbtrfs_oi_lookup_with_fid(osd_sb(osd),
+				       (struct lbtrfs_lu_fid *)fid,
+				       &inode_id.oii_ino, &inode_id.oii_gen);
 	if (rc == -ENOENT)
 		rc = osd_oi_create(env, osd, fid, inode);
 	else if (rc)

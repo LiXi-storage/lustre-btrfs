@@ -1,6 +1,6 @@
 default: all
 
-MODULES := btreefs
+MODULES := lbtrfs
 
 # copy makefile over to not break patches
 backfs_extra := $(wildcard @LINUX@/fs/btrfs/Makefile)
@@ -21,10 +21,10 @@ btrfs_new_headers :=
 new_sources := $(btrfs_new_sources)
 new_headers := $(btrfs_new_headers)
 
-btreefs_patched_sources := $(notdir $(backfs_sources) $(backfs_headers)) $(new_sources) $(new_headers)
-btreefs_sources := $(btreefs_patched_sources)
+lbtrfs_patched_sources := $(notdir $(backfs_sources) $(backfs_headers)) $(new_sources) $(new_headers)
+lbtrfs_sources := $(lbtrfs_patched_sources)
 
-btreefs-objs := $(filter-out check-integrity.o,$(filter-out acl.o,$(filter %.o,$(btreefs_sources:.c=.o))))
+lbtrfs-objs := $(filter-out check-integrity.o,$(filter-out acl.o,$(filter %.o,$(lbtrfs_sources:.c=.o))))
 
 EXTRA_PRE_CFLAGS := -I@LINUX@/fs -I@abs_top_srcdir@/btrfs
 
