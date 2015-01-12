@@ -524,17 +524,17 @@ out:
 static void osd_trans_commit_cb(struct btreefs_trans_cb_entry *callback,
                                 int error)
 {
-        struct osd_thandle *oh = container_of0(callback,
-        				       struct osd_thandle,
-        				       ot_callback);
-        struct thandle     *th  = &oh->ot_super;
-        struct lu_device   *lud = &th->th_dev->dd_lu_dev;
-        struct dt_txn_commit_cb *dcb, *tmp;
+	struct osd_thandle *oh = container_of0(callback,
+					       struct osd_thandle,
+					       ot_callback);
+	struct thandle     *th  = &oh->ot_super;
+	struct lu_device   *lud = &th->th_dev->dd_lu_dev;
+	struct dt_txn_commit_cb *dcb, *tmp;
 
-        if (error)
-                CERROR("transaction @0x%p commit error: %d\n", th, error);
+	if (error)
+		CERROR("transaction @0x%p commit error: %d\n", th, error);
 
-        dt_txn_hook_commit(th);
+	dt_txn_hook_commit(th);
 
 	/* call per-transaction callbacks if any */
 	list_for_each_entry_safe(dcb, tmp, &oh->ot_dcb_list, dcb_linkage) {
@@ -546,11 +546,11 @@ static void osd_trans_commit_cb(struct btreefs_trans_cb_entry *callback,
 	}
 
 	lu_ref_del_at(&lud->ld_reference, &oh->ot_dev_link, "osd-tx", th);
-        lu_device_put(lud);
-        th->th_dev = NULL;
+	lu_device_put(lud);
+	th->th_dev = NULL;
 
-        lu_context_exit(&th->th_ctx);
-        lu_context_fini(&th->th_ctx);
+	lu_context_exit(&th->th_ctx);
+	lu_context_fini(&th->th_ctx);
 	thandle_put(th);
 }
 
@@ -572,6 +572,9 @@ static int osd_trans_stop(const struct lu_env *env, struct dt_device *dt,
 		btreefs_add_transaction_callback(oh->ot_handle,
 						 osd_trans_commit_cb,
 						 &oh->ot_callback);
+		rc = dt_txn_hook_stop(env, th);
+		if (rc != 0)
+			CERROR("Failure in transaction hook: %d\n", rc);
 		rc = btreefs_trans_stop(osd_sb(dev), oh->ot_handle);
 	} else {
 		thandle_put(&oh->ot_super);
