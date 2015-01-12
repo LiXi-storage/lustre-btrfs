@@ -135,7 +135,7 @@ static inline char *mt_str(enum ldd_mount_type mt)
                 "reiserfs",
 		"ldiskfs2",
 		"zfs",
-		"btrfs",
+		"lbtrfs",
         };
         return mount_type_string[mt];
 }

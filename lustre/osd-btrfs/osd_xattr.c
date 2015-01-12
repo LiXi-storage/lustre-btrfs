@@ -68,7 +68,7 @@ static inline int __osd_xattr_get(struct inode *inode, struct dentry *dentry,
 }
 
 static inline int __osd_xattr_set(struct osd_thread_info *info,
-				  struct btreefs_trans_handle *trans,
+				  struct lbtrfs_trans_handle *trans,
 				  struct inode *inode, const char *name,
 				  const void *buf, int buflen, int fl)
 {
@@ -77,7 +77,7 @@ static inline int __osd_xattr_set(struct osd_thread_info *info,
 	ll_vfs_dq_init(inode);
 	dentry->d_inode = inode;
 	dentry->d_sb = inode->i_sb;
-	return __btreefs_setxattr(trans, inode, name, buf, buflen, fl);
+	return __lbtrfs_setxattr(trans, inode, name, buf, buflen, fl);
 }
 
 /*
@@ -111,7 +111,7 @@ static void osd_object_version_set(const struct lu_env *env,
 	/** Version is set after all inode operations are finished,
 	 *  so we should mark it dirty here */
 	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
-	btreefs_dirty_inode(inode);
+	lbtrfs_dirty_inode(inode);
 }
 
 /*

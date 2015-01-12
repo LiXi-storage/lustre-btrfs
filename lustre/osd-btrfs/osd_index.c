@@ -39,7 +39,7 @@
 
 #include "osd_internal.h"
 #include <lustre_fid.h>
-#include <btrfs/btreefs_inode.h>
+#include <btrfs/lbtrfs_inode.h>
 
 static inline
 struct dentry *osd_child_dentry_by_inode(const struct lu_env *env,
@@ -85,7 +85,7 @@ static int osd_dir_lookup(const struct lu_env *env, struct dt_object *dt,
 	struct inode		*obj_inode = obj->oo_inode;
 	struct dentry		*child_dentry;
 	struct inode		*child_inode;
-	struct btreefs_lu_fid	 fid;
+	struct lbtrfs_lu_fid	 fid;
 	ENTRY;
 
 	LASSERT(S_ISDIR(obj->oo_inode->i_mode));
@@ -108,16 +108,16 @@ static int osd_dir_lookup(const struct lu_env *env, struct dt_object *dt,
 
 	child_dentry = osd_child_dentry_get(env, obj,
 					    name, strlen(name));
-	child_inode = btreefs_lookup_dentry(obj_inode, child_dentry);
+	child_inode = lbtrfs_lookup_dentry(obj_inode, child_dentry);
 	if (IS_ERR(child_inode))
 		RETURN(PTR_ERR(child_inode));
 	else if (child_inode == NULL)
 		RETURN(-ENOENT);
 
 	/* LIXI TODO: remove OI from ino to FID */
-	rc = btreefs_oi_lookup_with_ino(obj_inode->i_sb,
-					btreefs_ino(child_inode),
-					BTREEFS_I(child_inode)->generation,
+	rc = lbtrfs_oi_lookup_with_ino(obj_inode->i_sb,
+					lbtrfs_ino(child_inode),
+					LBTRFS_I(child_inode)->generation,
 					&fid);
 	iput(child_inode);
 	if (rc == 0)
@@ -347,7 +347,7 @@ static int osd_dir_insert(const struct lu_env *env, struct dt_object *dt,
 		qstr->len = strlen(name);
 
 		mutex_lock(&obj->oo_inode->i_mutex);
-		rc = btreefs_add_entry(oh->ot_handle, obj->oo_inode,
+		rc = lbtrfs_add_entry(oh->ot_handle, obj->oo_inode,
 				       child_inode, qstr, &obj->oo_index);
 		mutex_unlock(&obj->oo_inode->i_mutex);
 		if (rc)
@@ -419,14 +419,14 @@ static int osd_dir_delete(const struct lu_env *env, struct dt_object *dt,
 
 	child_dentry = osd_child_dentry_get(env, obj,
 					    name, strlen(name));
-	child_inode = btreefs_lookup_dentry(obj_inode, child_dentry);
+	child_inode = lbtrfs_lookup_dentry(obj_inode, child_dentry);
 	if (IS_ERR(child_inode))
 		RETURN(PTR_ERR(child_inode));
 	else if (child_inode == NULL)
 		RETURN(-ENOENT);
 
-	rc = btreefs_unlink_inode(oh->ot_handle, BTREEFS_I(obj_inode)->root,
-				  obj_inode, child_inode, name, strlen(name));
+	rc = lbtrfs_unlink_inode(oh->ot_handle, LBTRFS_I(obj_inode)->root,
+				 obj_inode, child_inode, name, strlen(name));
 	iput(child_inode);
 
 	RETURN(rc);

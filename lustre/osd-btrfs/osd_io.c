@@ -94,7 +94,7 @@ static ssize_t osd_write(const struct lu_env *env, struct dt_object *dt,
 
 	/* LIXI TODO: symlink support */
 	LASSERT(!S_ISLNK(dt->do_lu.lo_header->loh_attr));
-	rc = btreefs_write_record(inode, buf->lb_buf, buf->lb_len, pos);
+	rc = lbtrfs_write_record(inode, buf->lb_buf, buf->lb_len, pos);
         return rc;
 }
 
@@ -111,7 +111,7 @@ static ssize_t osd_read(const struct lu_env *env, struct dt_object *dt,
 #endif /* LIXI */
 
 	LASSERT(!S_ISLNK(dt->do_lu.lo_header->loh_attr));
-	rc = btreefs_read_record(inode, buf->lb_buf, buf->lb_len, pos);
+	rc = lbtrfs_read_record(inode, buf->lb_buf, buf->lb_len, pos);
 
         return rc;
 }
@@ -152,7 +152,7 @@ static int osd_punch(const struct lu_env *env, struct dt_object *dt,
 	i_size_write(inode, start);
 	ll_truncate_pagecache(inode, start);
 	/* Btrfs does not have i_op->truncate() anyway */
-	btreefs_punch(inode, oh->ot_handle, start, end);
+	lbtrfs_punch(inode, oh->ot_handle, start, end);
 
 	/*
 	 * For a partial-page truncate, flush the page to disk immediately to
@@ -381,7 +381,7 @@ static int osd_read_prep(const struct lu_env *env, struct dt_object *dt,
 	}
 
 	if (iobuf->dr_npages)
-		rc = btreefs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
+		rc = lbtrfs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
 
 	RETURN(rc);
 }
@@ -443,7 +443,7 @@ static int osd_write_prep(const struct lu_env *env, struct dt_object *dt,
 	}
 
 	if (iobuf->dr_npages)
-		rc = btreefs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
+		rc = lbtrfs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
 
         RETURN(rc);
 }
@@ -530,13 +530,17 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 		i_size_write(inode, isize);
 
 	if (iobuf->dr_npages > 0)
-		rc = btreefs_write_commit(inode, iobuf->dr_pages, iobuf->dr_npages);
+		rc = lbtrfs_write_commit(inode, iobuf->dr_pages,
+					 iobuf->dr_npages);
 
-        if (likely(rc == 0)) {
-                if (isize > current_isize) {
-                        BTREEFS_I(inode)->disk_i_size = isize;
-                        /* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
-			btreefs_dirty_inode(inode);
+	if (likely(rc == 0)) {
+		if (isize > current_isize) {
+			LBTRFS_I(inode)->disk_i_size = isize;
+			/*
+			 * No s_op->dirty_inode() is defined,
+			 * so can't use ll_dirty_inode()
+			 */
+			lbtrfs_dirty_inode(inode);
                 }      
 	} else {
 		/* Recover the inode size if write fails */
