@@ -188,6 +188,10 @@ struct osd_thread_info {
 	struct timespec		  oti_time;
 	/** 0-copy IO */
 	struct osd_iobuf	  oti_iobuf;
+	/*
+	 * XXX temporary: fake struct file for osd_object_sync
+	 */
+	struct file		  oti_file;
 };
 
 struct osd_thandle {
