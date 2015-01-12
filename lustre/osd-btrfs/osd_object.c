@@ -830,6 +830,43 @@ static int osd_attr_set(const struct lu_env *env,
         return rc;
 }
 
+static int osd_object_sync(const struct lu_env *env, struct dt_object *dt,
+			   __u64 start, __u64 end)
+{
+	struct osd_object	*obj    = osd_dt_obj(dt);
+	struct inode		*inode  = obj->oo_inode;
+	struct osd_thread_info	*info   = osd_oti_get(env);
+	struct dentry		*dentry;
+	struct file		*file   = &info->oti_file;
+	int			rc;
+
+	ENTRY;
+
+	dentry = d_find_alias(inode);
+	if (dentry == NULL)
+		RETURN(-ENOENT);
+
+	file->f_dentry = dentry;
+	file->f_mapping = inode->i_mapping;
+	file->f_op = inode->i_fop;
+	set_file_inode(file, inode);
+
+#ifdef HAVE_FILE_FSYNC_4ARGS
+	rc = file->f_op->fsync(file, start, end, 0);
+#elif defined(HAVE_FILE_FSYNC_2ARGS)
+	mutex_lock(&inode->i_mutex);
+	rc = file->f_op->fsync(file, 0);
+	mutex_unlock(&inode->i_mutex);
+#else
+	mutex_lock(&inode->i_mutex);
+	rc = file->f_op->fsync(file, dentry, 0);
+	mutex_unlock(&inode->i_mutex);
+#endif
+	dput(dentry);
+
+	RETURN(rc);
+}
+
 static const struct dt_object_operations osd_obj_ops = {
 #ifdef LIXI
 	.do_read_lock         = osd_object_read_lock,
@@ -882,7 +919,7 @@ static const struct dt_object_operations osd_obj_ops = {
 	.do_declare_xattr_del = NULL,
 	.do_xattr_del         = NULL,
 	.do_xattr_list        = NULL,
-	.do_object_sync       = NULL,
+	.do_object_sync       = osd_object_sync,
 #endif /* LIXI */
 };
 
