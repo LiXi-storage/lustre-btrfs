@@ -523,7 +523,7 @@ find $RPM_BUILD_ROOT%{?rootdir}/lib/modules/%{kversion}/%{kmoddir} \
 %exclude %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/llog_test.ko
 %endif
 %if %{with btrfs}
-%exclude %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/btreefs.ko
+%exclude %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/lbtrfs.ko
 %exclude %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/osd_btrfs.ko
 %endif
 %if %{with ldiskfs}
@@ -543,7 +543,7 @@ find $RPM_BUILD_ROOT%{?rootdir}/lib/modules/%{kversion}/%{kmoddir} \
 %if %{with btrfs}
 %files osd-btrfs
 %defattr(-,root,root)
-%{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/btreefs.ko
+%{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/lbtrfs.ko
 %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/osd_btrfs.ko
 %if %{with lustre_utils}
 %{_libdir}/@PACKAGE@/mount_osd_btrfs.so

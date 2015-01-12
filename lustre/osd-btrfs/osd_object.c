@@ -40,7 +40,7 @@
 #include <linux/fs_struct.h>
 #include <lustre_fid.h>
 #include "osd_internal.h"
-#include <btrfs/btreefs_inode.h>
+#include <btrfs/lbtrfs_inode.h>
 #include <btrfs/object-index.h>
 
 extern struct kmem_cache *osd_object_kmem;
@@ -184,9 +184,9 @@ static int osd_object_print(const struct lu_env *env, void *cookie,
 
 	return (*p)(env, cookie,
 		    LUSTRE_OSD_BTRFS_NAME"-object@%p(i:%p:%llu/%llu)",
-                    o, inode,
-                    inode ? btreefs_ino(inode) : 0,
-                    inode ? BTREEFS_I(inode)->generation : 0);
+		    o, inode,
+		    inode ? lbtrfs_ino(inode) : 0,
+		    inode ? LBTRFS_I(inode)->generation : 0);
 }
 
 static inline int osd_object_invariant(const struct lu_object *l)
@@ -323,7 +323,7 @@ static int __osd_oi_insert(const struct lu_env *env, struct osd_object *obj,
 		qstr->len = strlen(info->oti_str);
 
 		mutex_lock(&dprant->d_inode->i_mutex);
-		rc = btreefs_add_entry(oh->ot_handle, dprant->d_inode,
+		rc = lbtrfs_add_entry(oh->ot_handle, dprant->d_inode,
 				       inode, qstr, &obj->oo_index);
 		mutex_unlock(&dprant->d_inode->i_mutex);
 		if (rc)
@@ -334,10 +334,10 @@ static int __osd_oi_insert(const struct lu_env *env, struct osd_object *obj,
 	osd_id_gen(id, obj->oo_inode->i_ino, obj->oo_inode->i_generation);
 	return osd_oi_insert(info, osd, fid, id, oh->ot_handle, OI_CHECK_FLD);
 #else /* LIXI */
-	rc = btreefs_oi_insert(oh->ot_handle, osd->od_mnt->mnt_sb,
-			       (struct btreefs_lu_fid *)fid,
-			       btreefs_ino(inode),
-			       BTREEFS_I(inode)->generation);
+	rc = lbtrfs_oi_insert(oh->ot_handle, osd->od_mnt->mnt_sb,
+			       (struct lbtrfs_lu_fid *)fid,
+			       lbtrfs_ino(inode),
+			       LBTRFS_I(inode)->generation);
 	CERROR("__osd_oi_insert LIXI XXX fid "DFID", rc = %d\n",
 	       PFID(fid), rc);
 	return rc;
@@ -382,7 +382,7 @@ static int __osd_object_create(struct osd_thread_info *info,
 		attr->la_mode = S_IFDIR | ((~S_IFMT) & attr->la_mode);
 
 	mutex_lock(&dir->i_mutex);
-	inode = btreefs_create_inode(oh->ot_handle, dir, attr->la_mode,
+	inode = lbtrfs_create_inode(oh->ot_handle, dir, attr->la_mode,
 				     (dev_t)attr->la_rdev, &obj->oo_index);
 	mutex_unlock(&dir->i_mutex);
 	if (IS_ERR(inode))
@@ -506,12 +506,12 @@ static int osd_object_ref_add(const struct lu_env *env,
 	} else {
 		inc_nlink(inode);
 		if (!S_ISDIR(inode->i_mode))
-			LASSERT(inode->i_nlink <= BTREEFS_LINK_MAX);
+			LASSERT(inode->i_nlink <= LBTRFS_LINK_MAX);
 	}
 	spin_unlock(&obj->oo_guard);
 
 	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
-	btreefs_dirty_inode(inode);
+	lbtrfs_dirty_inode(inode);
 	LINVRNT(osd_invariant(obj));
 
 	return rc;
@@ -579,7 +579,7 @@ static int osd_object_ref_del(const struct lu_env *env, struct dt_object *dt,
 	spin_unlock(&obj->oo_guard);
 
 	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
-	btreefs_dirty_inode(inode);
+	lbtrfs_dirty_inode(inode);
 	LINVRNT(osd_invariant(obj));
 
 	return 0;
@@ -657,16 +657,16 @@ static int osd_object_destroy(const struct lu_env *env,
 		 * No s_op->dirty_inode() is defined,
 		 * so can't use ll_dirty_inode()
 		 */
-		btreefs_dirty_inode(inode);
+		lbtrfs_dirty_inode(inode);
 	}
 
 #ifdef LIXI
 	osd_trans_exec_op(env, th, OSD_OT_DESTROY);
 #endif /* LIXI */
 
-	result = btreefs_oi_delete_with_fid(oh->ot_handle,
+	result = lbtrfs_oi_delete_with_fid(oh->ot_handle,
 					    osd->od_mnt->mnt_sb,
-					    (struct btreefs_lu_fid *)fid);
+					    (struct lbtrfs_lu_fid *)fid);
 
 #ifdef LIXI
         /* XXX: add to ext3 orphan list */
@@ -761,16 +761,16 @@ static int osd_inode_setattr(const struct lu_env *env,
 	if (bits == 0)
 		return 0;
 
-        if (bits & LA_ATIME)
-                inode->i_atime  = *osd_inode_time(env, inode, attr->la_atime);
-        if (bits & LA_CTIME)
-                inode->i_ctime  = *osd_inode_time(env, inode, attr->la_ctime);
-        if (bits & LA_MTIME)
-                inode->i_mtime  = *osd_inode_time(env, inode, attr->la_mtime);
-        if (bits & LA_SIZE) {
-                BTREEFS_I(inode)->disk_i_size = attr->la_size;
-                i_size_write(inode, attr->la_size);
-        }
+	if (bits & LA_ATIME)
+		inode->i_atime  = *osd_inode_time(env, inode, attr->la_atime);
+	if (bits & LA_CTIME)
+		inode->i_ctime  = *osd_inode_time(env, inode, attr->la_ctime);
+	if (bits & LA_MTIME)
+		inode->i_mtime  = *osd_inode_time(env, inode, attr->la_mtime);
+	if (bits & LA_SIZE) {
+		LBTRFS_I(inode)->disk_i_size = attr->la_size;
+		i_size_write(inode, attr->la_size);
+	}
 
 #if 0
         /* OSD should not change "i_blocks" which is used by quota.
@@ -791,11 +791,11 @@ static int osd_inode_setattr(const struct lu_env *env,
 		inode->i_rdev = attr->la_rdev;
 
         if (bits & LA_FLAGS) {
-                /* always keep S_NOCMTIME */
-                inode->i_flags = ll_ext_to_inode_flags(attr->la_flags) |
-                                 S_NOCMTIME;
-        }
-        return 0;
+		/* always keep S_NOCMTIME */
+		inode->i_flags = ll_ext_to_inode_flags(attr->la_flags) |
+				 S_NOCMTIME;
+	}
+	return 0;
 }
 
 static int osd_attr_set(const struct lu_env *env,
@@ -826,7 +826,7 @@ static int osd_attr_set(const struct lu_env *env,
 
 	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
         if (!rc)
-		btreefs_dirty_inode(inode);
+		lbtrfs_dirty_inode(inode);
         return rc;
 }
 

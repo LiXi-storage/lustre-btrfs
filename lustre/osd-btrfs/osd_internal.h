@@ -57,7 +57,7 @@
 #include <obd.h>
 
 #include <btrfs/object-index.h>
-#include <btrfs/btreefs_inode.h>
+#include <btrfs/lbtrfs_inode.h>
 
 /*
  * Storage cookie. Datum uniquely identifying inode on the underlying file
@@ -196,9 +196,9 @@ struct osd_thread_info {
 
 struct osd_thandle {
 	struct thandle			 ot_super;
-	struct btreefs_trans_handle	*ot_handle;
+	struct lbtrfs_trans_handle	*ot_handle;
 	int				 ot_item_number;
-	struct btreefs_trans_cb_entry	 ot_callback;
+	struct lbtrfs_trans_cb_entry	 ot_callback;
 	struct list_head		 ot_dcb_list;
 	/* Link to the device, for debugging. */
 	struct lu_ref_link		 ot_dev_link;

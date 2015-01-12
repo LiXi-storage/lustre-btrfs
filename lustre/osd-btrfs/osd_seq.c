@@ -40,7 +40,7 @@
 #include <lustre_fid.h>
 #include <lustre_disk.h>
 #include "osd_internal.h"
-#include <btrfs/btreefs_inode.h>
+#include <btrfs/lbtrfs_inode.h>
 #include <btrfs/object-index.h>
 
 static void osd_push_ctxt(const struct osd_device *dev,

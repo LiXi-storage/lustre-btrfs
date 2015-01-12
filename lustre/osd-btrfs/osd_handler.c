@@ -75,7 +75,7 @@
 
 /* LIXI XXX */
 #include <btrfs/object-index.h>
-#include <btrfs/btreefs_inode.h>
+#include <btrfs/lbtrfs_inode.h>
 
 const int osd_item_number[OTO_NR] = {
 	/*
@@ -244,7 +244,7 @@ static int osd_mount(const struct lu_env *env,
 	if (opts != NULL)
 		strncat(options, opts, option_size);
 
-	type = get_fs_type("btreefs");
+	type = get_fs_type("lbtrfs");
 	if (!type) {
 		CERROR("%s: cannot find btrfs module\n", name);
 		GOTO(out, rc = -ENODEV);
@@ -269,8 +269,8 @@ static int osd_mount(const struct lu_env *env,
 #endif
 
 	/* XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX */
-	btreefs_oi_test(o->od_mnt->mnt_sb);
-	btreefs_record_test(o->od_mnt);
+	lbtrfs_oi_test(o->od_mnt->mnt_sb);
+	lbtrfs_record_test(o->od_mnt);
 
 	/* Initialize oi before any file create or file open */
 	rc = osd_oi_init(env, o);
@@ -458,7 +458,7 @@ int osd_trans_start(const struct lu_env *env, struct dt_device *dt,
                     struct thandle *th)
 {
 	struct osd_device		*dev = osd_dt_dev(dt);
-	struct btreefs_trans_handle	*trans;
+	struct lbtrfs_trans_handle	*trans;
 	struct osd_thandle		*oh;
 	int				 rc = 0;
 
@@ -471,7 +471,7 @@ int osd_trans_start(const struct lu_env *env, struct dt_device *dt,
         if (rc != 0)
                 GOTO(out, rc);
 
-	trans = btreefs_trans_start(osd_sb(dev), oh->ot_item_number);
+	trans = lbtrfs_trans_start(osd_sb(dev), oh->ot_item_number);
 	if (IS_ERR(trans))
 		GOTO(out, rc = PTR_ERR(trans));
 
@@ -490,7 +490,7 @@ out:
 /*
  * Concurrency: shouldn't matter.
  */
-static void osd_trans_commit_cb(struct btreefs_trans_cb_entry *callback,
+static void osd_trans_commit_cb(struct lbtrfs_trans_cb_entry *callback,
                                 int error)
 {
 	struct osd_thandle *oh = container_of0(callback,
@@ -538,13 +538,13 @@ static int osd_trans_stop(const struct lu_env *env, struct dt_device *dt,
 	LASSERT(oh != NULL);
 
 	if (oh->ot_handle != NULL) {
-		btreefs_add_transaction_callback(oh->ot_handle,
+		lbtrfs_add_transaction_callback(oh->ot_handle,
 						 osd_trans_commit_cb,
 						 &oh->ot_callback);
 		rc = dt_txn_hook_stop(env, th);
 		if (rc != 0)
 			CERROR("Failure in transaction hook: %d\n", rc);
-		rc = btreefs_trans_stop(osd_sb(dev), oh->ot_handle);
+		rc = lbtrfs_trans_stop(osd_sb(dev), oh->ot_handle);
 	} else {
 		OBD_FREE_PTR(oh);
 	}
