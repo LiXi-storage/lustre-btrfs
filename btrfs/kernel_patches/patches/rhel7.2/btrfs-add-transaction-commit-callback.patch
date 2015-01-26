@@ -1,13 +1,13 @@
-From d1309918493008efa02dc208570e106fd118c950 Mon Sep 17 00:00:00 2001
+From 4e7c763e79533ebf78725c0605a45e6e74681a4b Mon Sep 17 00:00:00 2001
 From: Wang Shilong <wangshilong1991@gmail.com>
 Date: Mon, 16 Mar 2015 09:52:07 -0400
-Subject: [PATCH 2/5] btrfs: btrfs add transaction commit callback
+Subject: [PATCH 2/4] btrfs: btrfs add transaction commit callback
 
 ---
  fs/btrfs/btrfs_inode.h | 20 ++++++++++++++++++++
  fs/btrfs/transaction.c | 51 ++++++++++++++++++++++++++++++++++++++++++++++++++
- fs/btrfs/transaction.h |  3 +++
- 3 files changed, 74 insertions(+)
+ fs/btrfs/transaction.h |  6 +++++-
+ 3 files changed, 76 insertions(+), 1 deletion(-)
 
 diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
 index d22ca0f..ffe3c14 100644
@@ -39,7 +39,7 @@ index d22ca0f..ffe3c14 100644
 +					struct btrfs_trans_cb_entry *callback);
  #endif
 diff --git a/fs/btrfs/transaction.c b/fs/btrfs/transaction.c
-index de2969d..1f2e3d6 100644
+index de2969d..a808795 100644
 --- a/fs/btrfs/transaction.c
 +++ b/fs/btrfs/transaction.c
 @@ -58,6 +58,53 @@ static unsigned int btrfs_blocked_trans_types[TRANS_STATE_MAX] = {
@@ -104,15 +104,15 @@ index de2969d..1f2e3d6 100644
  		kmem_cache_free(btrfs_transaction_cachep, transaction);
  	}
  }
-@@ -248,6 +296,8 @@ loop:
- 	INIT_LIST_HEAD(&cur_trans->pending_chunks);
+@@ -249,6 +297,8 @@ loop:
  	INIT_LIST_HEAD(&cur_trans->switch_commits);
  	INIT_LIST_HEAD(&cur_trans->pending_ordered);
+ 	list_add_tail(&cur_trans->list, &fs_info->trans_list);
 +	INIT_LIST_HEAD(&cur_trans->commit_callbacks);
 +	spin_lock_init(&cur_trans->callback_lock);
- 	list_add_tail(&cur_trans->list, &fs_info->trans_list);
  	extent_io_tree_init(&cur_trans->dirty_pages,
  			     fs_info->btree_inode->i_mapping);
+ 	fs_info->generation++;
 @@ -839,6 +889,7 @@ int btrfs_end_transaction(struct btrfs_trans_handle *trans,
  {
  	return __btrfs_end_transaction(trans, root, 0);
@@ -122,19 +122,23 @@ index de2969d..1f2e3d6 100644
  int btrfs_end_transaction_throttle(struct btrfs_trans_handle *trans,
  				   struct btrfs_root *root)
 diff --git a/fs/btrfs/transaction.h b/fs/btrfs/transaction.h
-index 00ed29c..fee654b 100644
+index 00ed29c..8d38c60 100644
 --- a/fs/btrfs/transaction.h
 +++ b/fs/btrfs/transaction.h
-@@ -56,6 +56,9 @@ struct btrfs_transaction {
+@@ -56,8 +56,12 @@ struct btrfs_transaction {
  	wait_queue_head_t commit_wait;
  	struct list_head pending_snapshots;
  	struct list_head pending_chunks;
+-	struct list_head pending_ordered;
+ 	struct list_head switch_commits;
 +	spinlock_t callback_lock;
 +	/* protected by callback_lock */
 +	struct list_head commit_callbacks;
- 	struct list_head pending_ordered;
- 	struct list_head switch_commits;
++	struct list_head pending_ordered;
++
  	struct btrfs_delayed_ref_root delayed_refs;
+ 	int aborted;
+ };
 -- 
 1.8.3.1
 

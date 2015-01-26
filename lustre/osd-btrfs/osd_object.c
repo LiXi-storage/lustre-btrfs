@@ -115,7 +115,7 @@ static void osd_object_free(const struct lu_env *env, struct lu_object *l)
 	/* Should have been freed in osd_object_delete() */
 	LASSERT(obj->oo_inode == NULL);
         dt_object_fini(&obj->oo_dt);
-        OBD_FREE_PTR(obj);
+        OBD_SLAB_FREE_PTR(obj, osd_object_kmem);
 }
 
 /*
@@ -511,7 +511,7 @@ static int osd_object_ref_add(const struct lu_env *env,
 	spin_unlock(&obj->oo_guard);
 
 	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
-	lbtrfs_dirty_inode(inode);
+	lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(inode)->root, inode);
 	LINVRNT(osd_invariant(obj));
 
 	return rc;
@@ -579,7 +579,7 @@ static int osd_object_ref_del(const struct lu_env *env, struct dt_object *dt,
 	spin_unlock(&obj->oo_guard);
 
 	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
-	lbtrfs_dirty_inode(inode);
+	lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(inode)->root, inode);
 	LINVRNT(osd_invariant(obj));
 
 	return 0;
@@ -657,7 +657,7 @@ static int osd_object_destroy(const struct lu_env *env,
 		 * No s_op->dirty_inode() is defined,
 		 * so can't use ll_dirty_inode()
 		 */
-		lbtrfs_dirty_inode(inode);
+		lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(inode)->root, inode);
 	}
 
 #ifdef LIXI
@@ -801,16 +801,20 @@ static int osd_inode_setattr(const struct lu_env *env,
 static int osd_attr_set(const struct lu_env *env,
 			struct dt_object *dt,
 			const struct lu_attr *attr,
-			struct thandle *handle)
+			struct thandle *th)
 {
 	struct osd_object *obj = osd_dt_obj(dt);
 	struct inode      *inode;
 	int rc;
+	struct osd_thandle *oh;
 
-	LASSERT(handle != NULL);
 	LASSERT(dt_object_exists(dt));
 	LASSERT(!dt_object_remote(dt));
 	LASSERT(osd_invariant(obj));
+	LASSERT(th != NULL);
+
+	oh = container_of0(th, struct osd_thandle, ot_super);
+	LASSERT(oh->ot_handle != NULL);
 
         inode = obj->oo_inode;
 
@@ -826,7 +830,7 @@ static int osd_attr_set(const struct lu_env *env,
 
 	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
         if (!rc)
-		lbtrfs_dirty_inode(inode);
+		lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(inode)->root, inode);
         return rc;
 }
 

@@ -1,4 +1,4 @@
-From 2d74ff457e6cf699f31c7493401f50e12ec34cdd Mon Sep 17 00:00:00 2001
+From 10ead8dfee508809782270c490198d2e253a1688 Mon Sep 17 00:00:00 2001
 From: Wang Shilong <wangshilong1991@gmail.com>
 Date: Mon, 16 Mar 2015 10:56:45 -0400
 Subject: [PATCH 4/4] btrfs osd iop common
@@ -6,12 +6,12 @@ Subject: [PATCH 4/4] btrfs osd iop common
 ---
  fs/btrfs/btrfs_inode.h |  18 ++
  fs/btrfs/extent-tree.c |   4 +
- fs/btrfs/extent_io.c   | 236 ++++++++++++++++++-------
+ fs/btrfs/extent_io.c   | 230 +++++++++++++++++-------
  fs/btrfs/extent_io.h   |   8 +-
  fs/btrfs/file.c        |   1 +
  fs/btrfs/inode.c       | 469 ++++++++++++++++++++++++++++++++++++++++++++-----
  fs/btrfs/xattr.c       |   1 +
- 7 files changed, 623 insertions(+), 114 deletions(-)
+ 7 files changed, 619 insertions(+), 112 deletions(-)
 
 diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
 index ffe3c14..b92a781 100644
@@ -77,7 +77,7 @@ index a684086..c9f466c 100644
  static int update_block_group(struct btrfs_root *root,
  			      u64 bytenr, u64 num_bytes, int alloc)
 diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
-index 6afb46a..80429aa 100644
+index 6afb46a..8a52172 100644
 --- a/fs/btrfs/extent_io.c
 +++ b/fs/btrfs/extent_io.c
 @@ -1574,9 +1574,24 @@ out:
@@ -214,34 +214,21 @@ index 6afb46a..80429aa 100644
  {
  	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
  	int ret;
-@@ -1781,7 +1811,9 @@ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
- 				SetPagePrivate2(pages[i]);
- 
- 			if (pages[i] == locked_page) {
--				page_cache_release(pages[i]);
-+				if (!page_is_locked(locked_pages,
-+						    locked_page_num, pages[i]))
-+					page_cache_release(pages[i]);
- 				continue;
- 			}
- 			if (page_ops & PAGE_CLEAR_DIRTY)
-@@ -1792,9 +1824,12 @@ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
+@@ -1792,8 +1822,11 @@ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
  				SetPageError(pages[i]);
  			if (page_ops & PAGE_END_WRITEBACK)
  				end_page_writeback(pages[i]);
 -			if (page_ops & PAGE_UNLOCK)
 -				unlock_page(pages[i]);
--			page_cache_release(pages[i]);
 +			if (!page_is_locked(locked_pages,
 +					    locked_page_num, pages[i])) {
 +				if (page_ops & PAGE_UNLOCK)
 +					unlock_page(pages[i]);
-+				page_cache_release(pages[i]);
 +			}
+ 			page_cache_release(pages[i]);
  		}
  		nr_pages -= ret;
- 		index += ret;
-@@ -2909,7 +2944,8 @@ static int __do_readpage(struct extent_io_tree *tree,
+@@ -2909,7 +2942,8 @@ static int __do_readpage(struct extent_io_tree *tree,
  			 get_extent_t *get_extent,
  			 struct extent_map **em_cached,
  			 struct bio **bio, int mirror_num,
@@ -251,7 +238,7 @@ index 6afb46a..80429aa 100644
  {
  	struct inode *inode = page->mapping->host;
  	u64 start = page_offset(page);
-@@ -3072,7 +3108,8 @@ out:
+@@ -3072,7 +3106,8 @@ out:
  	if (!nr) {
  		if (!PageError(page))
  			SetPageUptodate(page);
@@ -261,7 +248,7 @@ index 6afb46a..80429aa 100644
  	}
  	return 0;
  }
-@@ -3083,7 +3120,8 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
+@@ -3083,7 +3118,8 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
  					     get_extent_t *get_extent,
  					     struct extent_map **em_cached,
  					     struct bio **bio, int mirror_num,
@@ -271,7 +258,7 @@ index 6afb46a..80429aa 100644
  {
  	struct inode *inode;
  	struct btrfs_ordered_extent *ordered;
-@@ -3103,8 +3141,9 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
+@@ -3103,8 +3139,9 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
  
  	for (index = 0; index < nr_pages; index++) {
  		__do_readpage(tree, pages[index], get_extent, em_cached, bio,
@@ -283,7 +270,7 @@ index 6afb46a..80429aa 100644
  	}
  }
  
-@@ -3113,7 +3152,8 @@ static void __extent_readpages(struct extent_io_tree *tree,
+@@ -3113,7 +3150,8 @@ static void __extent_readpages(struct extent_io_tree *tree,
  			       int nr_pages, get_extent_t *get_extent,
  			       struct extent_map **em_cached,
  			       struct bio **bio, int mirror_num,
@@ -293,7 +280,7 @@ index 6afb46a..80429aa 100644
  {
  	u64 start = 0;
  	u64 end = 0;
-@@ -3134,7 +3174,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
+@@ -3134,7 +3172,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
  						  index - first_index, start,
  						  end, get_extent, em_cached,
  						  bio, mirror_num, bio_flags,
@@ -302,7 +289,7 @@ index 6afb46a..80429aa 100644
  			start = page_start;
  			end = start + PAGE_CACHE_SIZE - 1;
  			first_index = index;
-@@ -3145,7 +3185,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
+@@ -3145,7 +3183,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
  		__do_contiguous_readpages(tree, &pages[first_index],
  					  index - first_index, start,
  					  end, get_extent, em_cached, bio,
@@ -311,7 +298,7 @@ index 6afb46a..80429aa 100644
  }
  
  static int __extent_read_full_page(struct extent_io_tree *tree,
-@@ -3171,7 +3211,7 @@ static int __extent_read_full_page(struct extent_io_tree *tree,
+@@ -3171,7 +3209,7 @@ static int __extent_read_full_page(struct extent_io_tree *tree,
  	}
  
  	ret = __do_readpage(tree, page, get_extent, NULL, bio, mirror_num,
@@ -320,7 +307,7 @@ index 6afb46a..80429aa 100644
  	return ret;
  }
  
-@@ -3197,7 +3237,7 @@ int extent_read_full_page_nolock(struct extent_io_tree *tree, struct page *page,
+@@ -3197,7 +3235,7 @@ int extent_read_full_page_nolock(struct extent_io_tree *tree, struct page *page,
  	int ret;
  
  	ret = __do_readpage(tree, page, get_extent, NULL, &bio, mirror_num,
@@ -329,7 +316,7 @@ index 6afb46a..80429aa 100644
  	if (bio)
  		ret = submit_one_bio(READ, bio, mirror_num, bio_flags);
  	return ret;
-@@ -3227,7 +3267,8 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+@@ -3227,7 +3265,8 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
  			      struct page *page, struct writeback_control *wbc,
  			      struct extent_page_data *epd,
  			      u64 delalloc_start,
@@ -339,7 +326,7 @@ index 6afb46a..80429aa 100644
  {
  	struct extent_io_tree *tree = epd->tree;
  	u64 page_end = delalloc_start + PAGE_CACHE_SIZE - 1;
-@@ -3245,7 +3286,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+@@ -3245,7 +3284,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
  					       page,
  					       &delalloc_start,
  					       &delalloc_end,
@@ -350,7 +337,7 @@ index 6afb46a..80429aa 100644
  		if (nr_delalloc == 0) {
  			delalloc_start = delalloc_end + 1;
  			continue;
-@@ -3254,7 +3297,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+@@ -3254,7 +3295,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
  					       delalloc_start,
  					       delalloc_end,
  					       &page_started,
@@ -361,7 +348,7 @@ index 6afb46a..80429aa 100644
  		/* File system has been set read-only */
  		if (ret) {
  			SetPageError(page);
-@@ -3318,7 +3363,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+@@ -3318,7 +3361,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
  				 struct extent_page_data *epd,
  				 loff_t i_size,
  				 unsigned long nr_written,
@@ -371,7 +358,7 @@ index 6afb46a..80429aa 100644
  {
  	struct extent_io_tree *tree = epd->tree;
  	u64 start = page_offset(page);
-@@ -3350,7 +3396,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+@@ -3350,7 +3394,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
  				redirty_page_for_writepage(wbc, page);
  
  			update_nr_written(page, wbc, nr_written);
@@ -381,7 +368,7 @@ index 6afb46a..80429aa 100644
  			ret = 1;
  			goto done_unlocked;
  		}
-@@ -3476,7 +3523,8 @@ done_unlocked:
+@@ -3476,7 +3521,8 @@ done_unlocked:
   * and the end_io handler clears the writeback ranges
   */
  static int __extent_writepage(struct page *page, struct writeback_control *wbc,
@@ -391,7 +378,7 @@ index 6afb46a..80429aa 100644
  {
  	struct inode *inode = page->mapping->host;
  	struct extent_page_data *epd = data;
-@@ -3501,36 +3549,36 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+@@ -3501,36 +3547,36 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
  
  	ClearPageError(page);
  
@@ -448,7 +435,7 @@ index 6afb46a..80429aa 100644
  	if (ret == 1)
  		goto done_unlocked;
  
-@@ -3544,7 +3592,8 @@ done:
+@@ -3544,7 +3590,8 @@ done:
  		ret = ret < 0 ? ret : -EIO;
  		end_extent_writepage(page, ret, start, page_end);
  	}
@@ -458,7 +445,7 @@ index 6afb46a..80429aa 100644
  	return ret;
  
  done_unlocked:
-@@ -4082,7 +4131,7 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
+@@ -4082,7 +4129,7 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
  		.bio_flags = 0,
  	};
  
@@ -467,7 +454,7 @@ index 6afb46a..80429aa 100644
  
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -4116,7 +4165,7 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+@@ -4116,7 +4163,7 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
  	while (start <= end) {
  		page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
  		if (clear_page_dirty_for_io(page))
@@ -476,7 +463,7 @@ index 6afb46a..80429aa 100644
  		else {
  			if (tree->ops && tree->ops->writepage_end_io_hook)
  				tree->ops->writepage_end_io_hook(page, start,
-@@ -4132,6 +4181,12 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+@@ -4132,6 +4179,12 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
  	return ret;
  }
  
@@ -489,7 +476,7 @@ index 6afb46a..80429aa 100644
  int extent_writepages(struct extent_io_tree *tree,
  		      struct address_space *mapping,
  		      get_extent_t *get_extent,
-@@ -4148,7 +4203,7 @@ int extent_writepages(struct extent_io_tree *tree,
+@@ -4148,7 +4201,7 @@ int extent_writepages(struct extent_io_tree *tree,
  	};
  
  	ret = extent_write_cache_pages(tree, mapping, wbc,
@@ -498,7 +485,7 @@ index 6afb46a..80429aa 100644
  				       flush_write_bio);
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -4182,12 +4237,12 @@ int extent_readpages(struct extent_io_tree *tree,
+@@ -4182,12 +4235,12 @@ int extent_readpages(struct extent_io_tree *tree,
  		if (nr < ARRAY_SIZE(pagepool))
  			continue;
  		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
@@ -513,7 +500,7 @@ index 6afb46a..80429aa 100644
  
  	if (em_cached)
  		free_extent_map(em_cached);
-@@ -5597,3 +5652,56 @@ int try_release_extent_buffer(struct page *page)
+@@ -5597,3 +5650,56 @@ int try_release_extent_buffer(struct page *page)
  
  	return release_extent_buffer(eb);
  }

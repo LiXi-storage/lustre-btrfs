@@ -384,22 +384,22 @@ static void osd_conf_get(const struct lu_env *env,
 int osd_statfs(const struct lu_env *env, struct dt_device *d,
                struct obd_statfs *sfs)
 {
-        struct osd_device  *osd = osd_dt_dev(d);
-        struct super_block *sb = osd_sb(osd);
-        struct kstatfs     *ksfs;
-        int result = 0;
+	struct osd_device  *osd = osd_dt_dev(d);
+	struct super_block *sb = osd_sb(osd);
+	struct kstatfs     *ksfs;
+	int result = 0;
 
 	if (unlikely(osd->od_mnt == NULL))
 		return -EINPROGRESS;
 
-        /* osd_lproc.c call this without env, allocate ksfs for that case */
-        if (unlikely(env == NULL)) {
-                OBD_ALLOC_PTR(ksfs);
-                if (ksfs == NULL)
-                        return -ENOMEM;
-        } else {
-                ksfs = &osd_oti_get(env)->oti_ksfs;
-        }
+	/* osd_lproc.c call this without env, allocate ksfs for that case */
+	if (unlikely(env == NULL)) {
+		OBD_ALLOC_PTR(ksfs);
+		if (ksfs == NULL)
+			return -ENOMEM;
+	} else {
+		ksfs = &osd_oti_get(env)->oti_ksfs;
+	}
 
 	spin_lock(&osd->od_osfs_lock);
 	result = sb->s_op->statfs(sb->s_root, ksfs);
@@ -538,13 +538,17 @@ static int osd_trans_stop(const struct lu_env *env, struct dt_device *dt,
 	LASSERT(oh != NULL);
 
 	if (oh->ot_handle != NULL) {
-		lbtrfs_add_transaction_callback(oh->ot_handle,
-						 osd_trans_commit_cb,
-						 &oh->ot_callback);
+		struct lbtrfs_trans_handle *hdl = oh->ot_handle;
+
+		lbtrfs_add_transaction_callback(hdl,
+						osd_trans_commit_cb,
+						&oh->ot_callback);
 		rc = dt_txn_hook_stop(env, th);
 		if (rc != 0)
 			CERROR("Failure in transaction hook: %d\n", rc);
-		rc = lbtrfs_trans_stop(osd_sb(dev), oh->ot_handle);
+
+		oh->ot_handle = NULL;
+		rc = lbtrfs_end_transaction(hdl, lbtrfs_sb(osd_sb(dev))->fs_root);
 	} else {
 		OBD_FREE_PTR(oh);
 	}
@@ -931,6 +935,7 @@ static void osd_key_fini(const struct lu_context *ctx,
 	struct osd_thread_info *info = data;
 
 	OBD_FREE(info->oti_pages, info->oti_nrptrs * sizeof(struct page *));
+	lu_buf_free(&info->oti_iobuf.dr_pg_buf);
 	OBD_FREE_PTR(info);
 }
 
