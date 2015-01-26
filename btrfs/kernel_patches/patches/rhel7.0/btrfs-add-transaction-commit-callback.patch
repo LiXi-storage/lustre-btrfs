@@ -1,8 +1,9 @@
-From d777f7b5a4668abdc76ae924ea70ff42d7dcaff5 Mon Sep 17 00:00:00 2001
+From 7e9ce6ed3d0030c65246ce7f91ab9e994da038c8 Mon Sep 17 00:00:00 2001
 From: Wang Shilong <wangshilong1991@gmail.com>
-Date: Mon, 16 Mar 2015 09:52:07 -0400
-Subject: [PATCH] btrfs: btrfs add transaction commit callback
+Date: Tue, 17 Mar 2015 10:16:55 -0400
+Subject: [PATCH] btrfs add transaction commit callback
 
+Signed-off-by: Wang Shilong <wshilong@ddn.com>
 ---
  fs/btrfs/btrfs_inode.h | 20 ++++++++++++++++++++
  fs/btrfs/transaction.c | 51 ++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -39,7 +40,7 @@ index 461ebb5..3514690 100644
 +					struct btrfs_trans_cb_entry *callback);
  #endif
 diff --git a/fs/btrfs/transaction.c b/fs/btrfs/transaction.c
-index e79bf88..eda0451 100644
+index e79bf88..4e024cf 100644
 --- a/fs/btrfs/transaction.c
 +++ b/fs/btrfs/transaction.c
 @@ -58,6 +58,53 @@ static unsigned int btrfs_blocked_trans_types[TRANS_STATE_MAX] = {
@@ -104,15 +105,15 @@ index e79bf88..eda0451 100644
  		kmem_cache_free(btrfs_transaction_cachep, transaction);
  	}
  }
-@@ -220,6 +268,8 @@ loop:
- 	INIT_LIST_HEAD(&cur_trans->pending_snapshots);
- 	INIT_LIST_HEAD(&cur_trans->ordered_operations);
+@@ -222,6 +270,8 @@ loop:
  	INIT_LIST_HEAD(&cur_trans->pending_chunks);
-+	INIT_LIST_HEAD(&cur_trans->commit_callbacks);
-+	spin_lock_init(&cur_trans->callback_lock);
  	INIT_LIST_HEAD(&cur_trans->switch_commits);
  	list_add_tail(&cur_trans->list, &fs_info->trans_list);
++	INIT_LIST_HEAD(&cur_trans->commit_callbacks);
++	spin_lock_init(&cur_trans->callback_lock);
  	extent_io_tree_init(&cur_trans->dirty_pages,
+ 			     fs_info->btree_inode->i_mapping);
+ 	fs_info->generation++;
 @@ -799,6 +849,7 @@ int btrfs_end_transaction(struct btrfs_trans_handle *trans,
  {
  	return __btrfs_end_transaction(trans, root, 0);
@@ -122,19 +123,19 @@ index e79bf88..eda0451 100644
  int btrfs_end_transaction_throttle(struct btrfs_trans_handle *trans,
  				   struct btrfs_root *root)
 diff --git a/fs/btrfs/transaction.h b/fs/btrfs/transaction.h
-index 7dd558e..7034f03 100644
+index 7dd558e..96b9946 100644
 --- a/fs/btrfs/transaction.h
 +++ b/fs/btrfs/transaction.h
-@@ -57,6 +57,9 @@ struct btrfs_transaction {
- 	struct list_head pending_snapshots;
+@@ -58,6 +58,9 @@ struct btrfs_transaction {
  	struct list_head ordered_operations;
  	struct list_head pending_chunks;
+ 	struct list_head switch_commits;
 +	spinlock_t callback_lock;
 +	/* protected by callback_lock */
 +	struct list_head commit_callbacks;
- 	struct list_head switch_commits;
  	struct btrfs_delayed_ref_root delayed_refs;
  	int aborted;
+ };
 -- 
 1.8.3.1
 

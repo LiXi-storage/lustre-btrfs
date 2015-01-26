@@ -2920,6 +2920,7 @@ static void ofd_fini(const struct lu_env *env, struct ofd_device *m)
 
 	ofd_stack_fini(env, m, &m->ofd_dt_dev.dd_lu_dev);
 	ofd_procfs_fini(m);
+	printk("XXXX atomic_read(&d->ld_ref) = %d\n", atomic_read(&d->ld_ref));
 	LASSERT(atomic_read(&d->ld_ref) == 0);
 	server_put_mount(obd->obd_name, true);
 	EXIT;

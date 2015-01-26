@@ -1,29 +1,28 @@
-From f3abca7b27b34d02b7e1710c29b8a30238808e5a Mon Sep 17 00:00:00 2001
+From adb3d8abb82f84befdb2a25e20ef7117842cbb7c Mon Sep 17 00:00:00 2001
 From: Wang Shilong <wangshilong1991@gmail.com>
-Date: Mon, 16 Mar 2015 10:56:45 -0400
+Date: Tue, 17 Mar 2015 10:13:37 -0400
 Subject: [PATCH] btrfs osd iop common
 
 ---
- fs/btrfs/btrfs_inode.h |  18 ++
+ fs/btrfs/btrfs_inode.h |  17 ++
  fs/btrfs/extent-tree.c |   4 +
- fs/btrfs/extent_io.c   | 240 +++++++++++++++++-------
+ fs/btrfs/extent_io.c   | 231 ++++++++++++++++-------
  fs/btrfs/extent_io.h   |   8 +-
  fs/btrfs/file.c        |   1 +
- fs/btrfs/inode.c       | 486 ++++++++++++++++++++++++++++++++++++++++++++-----
+ fs/btrfs/inode.c       | 483 ++++++++++++++++++++++++++++++++++++++++++++-----
  fs/btrfs/xattr.c       |   1 +
- 7 files changed, 643 insertions(+), 115 deletions(-)
+ 7 files changed, 636 insertions(+), 109 deletions(-)
 
 diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
-index 3514690..d92c332 100644
+index 3514690..f9d1353 100644
 --- a/fs/btrfs/btrfs_inode.h
 +++ b/fs/btrfs/btrfs_inode.h
-@@ -328,4 +328,22 @@ void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
+@@ -328,4 +328,21 @@ void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
  				    struct btrfs_trans_cb_entry *callback);
  bool btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
  					struct btrfs_trans_cb_entry *callback);
 +int btrfs_update_inode(struct btrfs_trans_handle *trans,
 +		       struct btrfs_root *root, struct inode *inode);
-+int btrfs_dirty_inode(struct inode *inode);
 +struct inode *btrfs_create_inode(struct btrfs_trans_handle *trans,
 +				 struct inode *dir, umode_t mode,
 +				 dev_t rdev, u64 *index);
@@ -77,7 +76,7 @@ index 813537f..88f7a72 100644
  static int update_block_group(struct btrfs_root *root,
  			      u64 bytenr, u64 num_bytes, int alloc)
 diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
-index 524568e..23af2d0 100644
+index 524568e..6f6f1ea 100644
 --- a/fs/btrfs/extent_io.c
 +++ b/fs/btrfs/extent_io.c
 @@ -1549,9 +1549,24 @@ out:
@@ -106,22 +105,20 @@ index 524568e..23af2d0 100644
  {
  	int ret;
  	struct page *pages[16];
-@@ -1568,9 +1583,12 @@ static noinline void __unlock_for_delalloc(struct inode *inode,
+@@ -1568,8 +1583,11 @@ static noinline void __unlock_for_delalloc(struct inode *inode,
  				     min_t(unsigned long, nr_pages,
  				     ARRAY_SIZE(pages)), pages);
  		for (i = 0; i < ret; i++) {
 -			if (pages[i] != locked_page)
 -				unlock_page(pages[i]);
--			page_cache_release(pages[i]);
 +			if (!page_is_locked(locked_pages, locked_page_num,
 +					    pages[i])) {
 +				if (pages[i] != locked_page)
 +					unlock_page(pages[i]);
-+				page_cache_release(pages[i]);
 +			}
+ 			page_cache_release(pages[i]);
  		}
  		nr_pages -= ret;
- 		index += ret;
 @@ -1581,7 +1599,9 @@ static noinline void __unlock_for_delalloc(struct inode *inode,
  static noinline int lock_delalloc_pages(struct inode *inode,
  					struct page *locked_page,
@@ -157,10 +154,9 @@ index 524568e..23af2d0 100644
 +						goto done;
 +					}
  				}
-+				page_cache_release(pages[i]);
 +				pages_locked++;
  			}
--			page_cache_release(pages[i]);
+ 			page_cache_release(pages[i]);
 -			pages_locked++;
  		}
  		nrpages -= ret;
@@ -217,34 +213,21 @@ index 524568e..23af2d0 100644
  {
  	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
  	int ret;
-@@ -1753,7 +1783,9 @@ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
- 				SetPagePrivate2(pages[i]);
- 
- 			if (pages[i] == locked_page) {
--				page_cache_release(pages[i]);
-+				if (!page_is_locked(locked_pages,
-+						    locked_page_num, pages[i]))
-+					page_cache_release(pages[i]);
- 				continue;
- 			}
- 			if (page_ops & PAGE_CLEAR_DIRTY)
-@@ -1762,9 +1794,12 @@ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
+@@ -1762,8 +1792,11 @@ int extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
  				set_page_writeback(pages[i]);
  			if (page_ops & PAGE_END_WRITEBACK)
  				end_page_writeback(pages[i]);
 -			if (page_ops & PAGE_UNLOCK)
 -				unlock_page(pages[i]);
--			page_cache_release(pages[i]);
 +			if (!page_is_locked(locked_pages,
 +					    locked_page_num, pages[i])) {
 +				if (page_ops & PAGE_UNLOCK)
 +					unlock_page(pages[i]);
-+				page_cache_release(pages[i]);
 +			}
+ 			page_cache_release(pages[i]);
  		}
  		nr_pages -= ret;
- 		index += ret;
-@@ -2802,7 +2837,8 @@ static int __do_readpage(struct extent_io_tree *tree,
+@@ -2802,7 +2835,8 @@ static int __do_readpage(struct extent_io_tree *tree,
  			 get_extent_t *get_extent,
  			 struct extent_map **em_cached,
  			 struct bio **bio, int mirror_num,
@@ -254,7 +237,7 @@ index 524568e..23af2d0 100644
  {
  	struct inode *inode = page->mapping->host;
  	u64 start = page_offset(page);
-@@ -2965,7 +3001,8 @@ out:
+@@ -2965,7 +2999,8 @@ out:
  	if (!nr) {
  		if (!PageError(page))
  			SetPageUptodate(page);
@@ -264,7 +247,7 @@ index 524568e..23af2d0 100644
  	}
  	return 0;
  }
-@@ -2976,7 +3013,8 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
+@@ -2976,7 +3011,8 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
  					     get_extent_t *get_extent,
  					     struct extent_map **em_cached,
  					     struct bio **bio, int mirror_num,
@@ -274,7 +257,7 @@ index 524568e..23af2d0 100644
  {
  	struct inode *inode;
  	struct btrfs_ordered_extent *ordered;
-@@ -2996,8 +3034,9 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
+@@ -2996,8 +3032,9 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
  
  	for (index = 0; index < nr_pages; index++) {
  		__do_readpage(tree, pages[index], get_extent, em_cached, bio,
@@ -286,7 +269,7 @@ index 524568e..23af2d0 100644
  	}
  }
  
-@@ -3006,7 +3045,8 @@ static void __extent_readpages(struct extent_io_tree *tree,
+@@ -3006,7 +3043,8 @@ static void __extent_readpages(struct extent_io_tree *tree,
  			       int nr_pages, get_extent_t *get_extent,
  			       struct extent_map **em_cached,
  			       struct bio **bio, int mirror_num,
@@ -296,7 +279,7 @@ index 524568e..23af2d0 100644
  {
  	u64 start = 0;
  	u64 end = 0;
-@@ -3027,7 +3067,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
+@@ -3027,7 +3065,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
  						  index - first_index, start,
  						  end, get_extent, em_cached,
  						  bio, mirror_num, bio_flags,
@@ -305,7 +288,7 @@ index 524568e..23af2d0 100644
  			start = page_start;
  			end = start + PAGE_CACHE_SIZE - 1;
  			first_index = index;
-@@ -3038,7 +3078,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
+@@ -3038,7 +3076,7 @@ static void __extent_readpages(struct extent_io_tree *tree,
  		__do_contiguous_readpages(tree, &pages[first_index],
  					  index - first_index, start,
  					  end, get_extent, em_cached, bio,
@@ -314,7 +297,7 @@ index 524568e..23af2d0 100644
  }
  
  static int __extent_read_full_page(struct extent_io_tree *tree,
-@@ -3064,7 +3104,7 @@ static int __extent_read_full_page(struct extent_io_tree *tree,
+@@ -3064,7 +3102,7 @@ static int __extent_read_full_page(struct extent_io_tree *tree,
  	}
  
  	ret = __do_readpage(tree, page, get_extent, NULL, bio, mirror_num,
@@ -323,7 +306,7 @@ index 524568e..23af2d0 100644
  	return ret;
  }
  
-@@ -3090,7 +3130,7 @@ int extent_read_full_page_nolock(struct extent_io_tree *tree, struct page *page,
+@@ -3090,7 +3128,7 @@ int extent_read_full_page_nolock(struct extent_io_tree *tree, struct page *page,
  	int ret;
  
  	ret = __do_readpage(tree, page, get_extent, NULL, &bio, mirror_num,
@@ -332,7 +315,7 @@ index 524568e..23af2d0 100644
  	if (bio)
  		ret = submit_one_bio(READ, bio, mirror_num, bio_flags);
  	return ret;
-@@ -3120,7 +3160,8 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+@@ -3120,7 +3158,8 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
  			      struct page *page, struct writeback_control *wbc,
  			      struct extent_page_data *epd,
  			      u64 delalloc_start,
@@ -342,7 +325,7 @@ index 524568e..23af2d0 100644
  {
  	struct extent_io_tree *tree = epd->tree;
  	u64 page_end = delalloc_start + PAGE_CACHE_SIZE - 1;
-@@ -3138,7 +3179,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+@@ -3138,7 +3177,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
  					       page,
  					       &delalloc_start,
  					       &delalloc_end,
@@ -353,7 +336,7 @@ index 524568e..23af2d0 100644
  		if (nr_delalloc == 0) {
  			delalloc_start = delalloc_end + 1;
  			continue;
-@@ -3147,7 +3190,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+@@ -3147,7 +3188,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
  					       delalloc_start,
  					       delalloc_end,
  					       &page_started,
@@ -364,7 +347,7 @@ index 524568e..23af2d0 100644
  		/* File system has been set read-only */
  		if (ret) {
  			SetPageError(page);
-@@ -3211,7 +3256,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+@@ -3211,7 +3254,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
  				 struct extent_page_data *epd,
  				 loff_t i_size,
  				 unsigned long nr_written,
@@ -374,7 +357,7 @@ index 524568e..23af2d0 100644
  {
  	struct extent_io_tree *tree = epd->tree;
  	u64 start = page_offset(page);
-@@ -3243,7 +3289,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+@@ -3243,7 +3287,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
  				redirty_page_for_writepage(wbc, page);
  
  			update_nr_written(page, wbc, nr_written);
@@ -384,7 +367,7 @@ index 524568e..23af2d0 100644
  			ret = 1;
  			goto done_unlocked;
  		}
-@@ -3369,7 +3416,8 @@ done_unlocked:
+@@ -3369,7 +3414,8 @@ done_unlocked:
   * and the end_io handler clears the writeback ranges
   */
  static int __extent_writepage(struct page *page, struct writeback_control *wbc,
@@ -394,7 +377,7 @@ index 524568e..23af2d0 100644
  {
  	struct inode *inode = page->mapping->host;
  	struct extent_page_data *epd = data;
-@@ -3394,36 +3442,36 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+@@ -3394,36 +3440,37 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
  
  	ClearPageError(page);
  
@@ -439,7 +422,7 @@ index 524568e..23af2d0 100644
  
 -	ret = writepage_delalloc(inode, page, wbc, epd, start, &nr_written);
 +	ret = writepage_delalloc(inode, page, wbc, epd, start, &nr_written,
-+				locked_pages, locked_page_num);
++				 locked_pages, locked_page_num);
  	if (ret == 1)
  		goto done_unlocked;
  	if (ret)
@@ -447,11 +430,12 @@ index 524568e..23af2d0 100644
  
  	ret = __extent_writepage_io(inode, page, wbc, epd,
 -				    i_size, nr_written, write_flags, &nr);
-+				    i_size, nr_written, write_flags, &nr, keep_page);
++				    i_size, nr_written, write_flags, &nr,
++				   keep_page);
  	if (ret == 1)
  		goto done_unlocked;
  
-@@ -3437,7 +3485,8 @@ done:
+@@ -3437,7 +3484,8 @@ done:
  		ret = ret < 0 ? ret : -EIO;
  		end_extent_writepage(page, ret, start, page_end);
  	}
@@ -461,7 +445,7 @@ index 524568e..23af2d0 100644
  	return ret;
  
  done_unlocked:
-@@ -3913,7 +3962,7 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
+@@ -3913,7 +3961,7 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
  		.bio_flags = 0,
  	};
  
@@ -470,7 +454,7 @@ index 524568e..23af2d0 100644
  
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -3947,7 +3996,7 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+@@ -3947,7 +3995,7 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
  	while (start <= end) {
  		page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
  		if (clear_page_dirty_for_io(page))
@@ -479,7 +463,7 @@ index 524568e..23af2d0 100644
  		else {
  			if (tree->ops && tree->ops->writepage_end_io_hook)
  				tree->ops->writepage_end_io_hook(page, start,
-@@ -3963,6 +4012,12 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+@@ -3963,6 +4011,12 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
  	return ret;
  }
  
@@ -492,7 +476,7 @@ index 524568e..23af2d0 100644
  int extent_writepages(struct extent_io_tree *tree,
  		      struct address_space *mapping,
  		      get_extent_t *get_extent,
-@@ -3979,7 +4034,7 @@ int extent_writepages(struct extent_io_tree *tree,
+@@ -3979,7 +4033,7 @@ int extent_writepages(struct extent_io_tree *tree,
  	};
  
  	ret = extent_write_cache_pages(tree, mapping, wbc,
@@ -501,7 +485,7 @@ index 524568e..23af2d0 100644
  				       flush_write_bio);
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -4013,12 +4068,12 @@ int extent_readpages(struct extent_io_tree *tree,
+@@ -4013,12 +4067,12 @@ int extent_readpages(struct extent_io_tree *tree,
  		if (nr < ARRAY_SIZE(pagepool))
  			continue;
  		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
@@ -516,7 +500,7 @@ index 524568e..23af2d0 100644
  
  	if (em_cached)
  		free_extent_map(em_cached);
-@@ -5443,3 +5498,56 @@ int try_release_extent_buffer(struct page *page)
+@@ -5443,3 +5497,56 @@ int try_release_extent_buffer(struct page *page)
  
  	return release_extent_buffer(eb);
  }
@@ -612,10 +596,10 @@ index 464bb23..09f250d 100644
  /*
   * this drops all the extents in the cache that intersect the range
 diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
-index b65e871..b1e96b4 100644
+index b65e871..3e20e79 100644
 --- a/fs/btrfs/inode.c
 +++ b/fs/btrfs/inode.c
-@@ -89,15 +89,15 @@ static int btrfs_finish_ordered_io(struct btrfs_ordered_extent *ordered_extent);
+@@ -89,13 +89,14 @@ static int btrfs_finish_ordered_io(struct btrfs_ordered_extent *ordered_extent);
  static noinline int cow_file_range(struct inode *inode,
  				   struct page *locked_page,
  				   u64 start, u64 end, int *page_started,
@@ -628,13 +612,11 @@ index b65e871..b1e96b4 100644
  					   u64 block_start, u64 block_len,
  					   u64 orig_block_len, u64 ram_bytes,
  					   int type);
- 
--static int btrfs_dirty_inode(struct inode *inode);
 -
+ static int btrfs_dirty_inode(struct inode *inode);
+ 
  int btrfs_init_inode_security(struct btrfs_trans_handle *trans,
- 			      struct inode *inode, struct inode *dir,
- 			      const struct qstr *qstr)
-@@ -315,6 +315,8 @@ struct async_cow {
+@@ -315,6 +316,8 @@ struct async_cow {
  	u64 end;
  	struct list_head extents;
  	struct btrfs_work work;
@@ -643,7 +625,7 @@ index b65e871..b1e96b4 100644
  };
  
  static noinline int add_async_extent(struct async_cow *cow,
-@@ -359,7 +361,9 @@ static noinline int compress_file_range(struct inode *inode,
+@@ -359,7 +362,9 @@ static noinline int compress_file_range(struct inode *inode,
  					struct page *locked_page,
  					u64 start, u64 end,
  					struct async_cow *async_cow,
@@ -654,7 +636,7 @@ index b65e871..b1e96b4 100644
  {
  	struct btrfs_root *root = BTRFS_I(inode)->root;
  	u64 num_bytes;
-@@ -514,7 +518,8 @@ cont:
+@@ -514,7 +519,8 @@ cont:
  						     clear_flags, PAGE_UNLOCK |
  						     PAGE_CLEAR_DIRTY |
  						     PAGE_SET_WRITEBACK |
@@ -664,7 +646,7 @@ index b65e871..b1e96b4 100644
  			goto free_pages_out;
  		}
  	}
-@@ -653,7 +658,9 @@ retry:
+@@ -653,7 +659,9 @@ retry:
  					     async_extent->start,
  					     async_extent->start +
  					     async_extent->ram_size - 1,
@@ -675,7 +657,7 @@ index b65e871..b1e96b4 100644
  
  			/* JDM XXX */
  
-@@ -767,7 +774,9 @@ retry:
+@@ -767,7 +775,9 @@ retry:
  				async_extent->ram_size - 1,
  				NULL, EXTENT_LOCKED | EXTENT_DELALLOC,
  				PAGE_UNLOCK | PAGE_CLEAR_DIRTY |
@@ -686,7 +668,7 @@ index b65e871..b1e96b4 100644
  		ret = btrfs_submit_compressed_write(inode,
  				    async_extent->start,
  				    async_extent->ram_size,
-@@ -792,7 +801,9 @@ out_free:
+@@ -792,7 +802,9 @@ out_free:
  				     NULL, EXTENT_LOCKED | EXTENT_DELALLOC |
  				     EXTENT_DEFRAG | EXTENT_DO_ACCOUNTING,
  				     PAGE_UNLOCK | PAGE_CLEAR_DIRTY |
@@ -697,7 +679,7 @@ index b65e871..b1e96b4 100644
  	kfree(async_extent);
  	goto again;
  }
-@@ -846,7 +857,9 @@ static noinline int cow_file_range(struct inode *inode,
+@@ -846,7 +858,9 @@ static noinline int cow_file_range(struct inode *inode,
  				   struct page *locked_page,
  				   u64 start, u64 end, int *page_started,
  				   unsigned long *nr_written,
@@ -708,7 +690,7 @@ index b65e871..b1e96b4 100644
  {
  	struct btrfs_root *root = BTRFS_I(inode)->root;
  	u64 alloc_hint = 0;
-@@ -884,7 +897,8 @@ static noinline int cow_file_range(struct inode *inode,
+@@ -884,7 +898,8 @@ static noinline int cow_file_range(struct inode *inode,
  				     EXTENT_LOCKED | EXTENT_DELALLOC |
  				     EXTENT_DEFRAG, PAGE_UNLOCK |
  				     PAGE_CLEAR_DIRTY | PAGE_SET_WRITEBACK |
@@ -718,7 +700,7 @@ index b65e871..b1e96b4 100644
  
  			*nr_written = *nr_written +
  			     (end - start + PAGE_CACHE_SIZE) / PAGE_CACHE_SIZE;
-@@ -975,7 +989,8 @@ static noinline int cow_file_range(struct inode *inode,
+@@ -975,7 +990,8 @@ static noinline int cow_file_range(struct inode *inode,
  		extent_clear_unlock_delalloc(inode, start,
  					     start + ram_size - 1, locked_page,
  					     EXTENT_LOCKED | EXTENT_DELALLOC,
@@ -728,7 +710,7 @@ index b65e871..b1e96b4 100644
  		disk_num_bytes -= cur_alloc_size;
  		num_bytes -= cur_alloc_size;
  		alloc_hint = ins.objectid + ins.offset;
-@@ -991,7 +1006,8 @@ out_unlock:
+@@ -991,7 +1007,8 @@ out_unlock:
  				     EXTENT_LOCKED | EXTENT_DO_ACCOUNTING |
  				     EXTENT_DELALLOC | EXTENT_DEFRAG,
  				     PAGE_UNLOCK | PAGE_CLEAR_DIRTY |
@@ -738,7 +720,7 @@ index b65e871..b1e96b4 100644
  	goto out;
  }
  
-@@ -1006,7 +1022,8 @@ static noinline void async_cow_start(struct btrfs_work *work)
+@@ -1006,7 +1023,8 @@ static noinline void async_cow_start(struct btrfs_work *work)
  
  	compress_file_range(async_cow->inode, async_cow->locked_page,
  			    async_cow->start, async_cow->end, async_cow,
@@ -748,7 +730,7 @@ index b65e871..b1e96b4 100644
  	if (num_added == 0) {
  		btrfs_add_delayed_iput(async_cow->inode);
  		async_cow->inode = NULL;
-@@ -1048,7 +1065,9 @@ static noinline void async_cow_free(struct btrfs_work *work)
+@@ -1048,7 +1066,9 @@ static noinline void async_cow_free(struct btrfs_work *work)
  
  static int cow_file_range_async(struct inode *inode, struct page *locked_page,
  				u64 start, u64 end, int *page_started,
@@ -759,7 +741,7 @@ index b65e871..b1e96b4 100644
  {
  	struct async_cow *async_cow;
  	struct btrfs_root *root = BTRFS_I(inode)->root;
-@@ -1065,6 +1084,8 @@ static int cow_file_range_async(struct inode *inode, struct page *locked_page,
+@@ -1065,6 +1085,8 @@ static int cow_file_range_async(struct inode *inode, struct page *locked_page,
  		async_cow->root = root;
  		async_cow->locked_page = locked_page;
  		async_cow->start = start;
@@ -768,7 +750,7 @@ index b65e871..b1e96b4 100644
  
  		if (BTRFS_I(inode)->flags & BTRFS_INODE_NOCOMPRESS)
  			cur_end = end;
-@@ -1133,8 +1154,10 @@ static noinline int csum_exist_in_range(struct btrfs_root *root,
+@@ -1133,8 +1155,10 @@ static noinline int csum_exist_in_range(struct btrfs_root *root,
   */
  static noinline int run_delalloc_nocow(struct inode *inode,
  				       struct page *locked_page,
@@ -781,7 +763,7 @@ index b65e871..b1e96b4 100644
  {
  	struct btrfs_root *root = BTRFS_I(inode)->root;
  	struct btrfs_trans_handle *trans;
-@@ -1166,7 +1189,8 @@ static noinline int run_delalloc_nocow(struct inode *inode,
+@@ -1166,7 +1190,8 @@ static noinline int run_delalloc_nocow(struct inode *inode,
  					     EXTENT_DEFRAG, PAGE_UNLOCK |
  					     PAGE_CLEAR_DIRTY |
  					     PAGE_SET_WRITEBACK |
@@ -791,7 +773,7 @@ index b65e871..b1e96b4 100644
  		return -ENOMEM;
  	}
  
-@@ -1184,7 +1208,8 @@ static noinline int run_delalloc_nocow(struct inode *inode,
+@@ -1184,7 +1209,8 @@ static noinline int run_delalloc_nocow(struct inode *inode,
  					     EXTENT_DEFRAG, PAGE_UNLOCK |
  					     PAGE_CLEAR_DIRTY |
  					     PAGE_SET_WRITEBACK |
@@ -801,7 +783,7 @@ index b65e871..b1e96b4 100644
  		btrfs_free_path(path);
  		return PTR_ERR(trans);
  	}
-@@ -1314,7 +1339,8 @@ out_check:
+@@ -1314,7 +1340,8 @@ out_check:
  		if (cow_start != (u64)-1) {
  			ret = cow_file_range(inode, locked_page,
  					     cow_start, found_key.offset - 1,
@@ -811,17 +793,17 @@ index b65e871..b1e96b4 100644
  			if (ret) {
  				if (!nolock && nocow)
  					btrfs_end_nocow_write(root);
-@@ -1377,7 +1403,8 @@ out_check:
+@@ -1377,7 +1404,8 @@ out_check:
  					     cur_offset + num_bytes - 1,
  					     locked_page, EXTENT_LOCKED |
  					     EXTENT_DELALLOC, PAGE_UNLOCK |
 -					     PAGE_SET_PRIVATE2);
 +					     PAGE_SET_PRIVATE2,
-+					    locked_pages, locked_page_num);
++					     locked_pages, locked_page_num);
  		if (!nolock && nocow)
  			btrfs_end_nocow_write(root);
  		cur_offset = extent_end;
-@@ -1393,7 +1420,8 @@ out_check:
+@@ -1393,7 +1421,8 @@ out_check:
  
  	if (cow_start != (u64)-1) {
  		ret = cow_file_range(inode, locked_page, cow_start, end,
@@ -831,7 +813,7 @@ index b65e871..b1e96b4 100644
  		if (ret)
  			goto error;
  	}
-@@ -1410,7 +1438,8 @@ error:
+@@ -1410,7 +1439,8 @@ error:
  					     EXTENT_DO_ACCOUNTING, PAGE_UNLOCK |
  					     PAGE_CLEAR_DIRTY |
  					     PAGE_SET_WRITEBACK |
@@ -841,7 +823,7 @@ index b65e871..b1e96b4 100644
  	btrfs_free_path(path);
  	return ret;
  }
-@@ -1420,27 +1449,34 @@ error:
+@@ -1420,27 +1450,34 @@ error:
   */
  static int run_delalloc_range(struct inode *inode, struct page *locked_page,
  			      u64 start, u64 end, int *page_started,
@@ -881,7 +863,7 @@ index b65e871..b1e96b4 100644
  	}
  	return ret;
  }
-@@ -3639,6 +3675,8 @@ noinline int btrfs_update_inode(struct btrfs_trans_handle *trans,
+@@ -3639,6 +3676,8 @@ noinline int btrfs_update_inode(struct btrfs_trans_handle *trans,
  
  	return btrfs_update_inode_item(trans, root, inode);
  }
@@ -890,7 +872,7 @@ index b65e871..b1e96b4 100644
  
  noinline int btrfs_update_inode_fallback(struct btrfs_trans_handle *trans,
  					 struct btrfs_root *root,
-@@ -3769,6 +3807,7 @@ int btrfs_unlink_inode(struct btrfs_trans_handle *trans,
+@@ -3769,6 +3808,7 @@ int btrfs_unlink_inode(struct btrfs_trans_handle *trans,
  	}
  	return ret;
  }
@@ -898,7 +880,7 @@ index b65e871..b1e96b4 100644
  
  /*
   * helper to start transaction for unlink and rmdir.
-@@ -5161,6 +5200,7 @@ struct inode *btrfs_lookup_dentry(struct inode *dir, struct dentry *dentry)
+@@ -5161,6 +5201,7 @@ struct inode *btrfs_lookup_dentry(struct inode *dir, struct dentry *dentry)
  
  	return inode;
  }
@@ -906,23 +888,6 @@ index b65e871..b1e96b4 100644
  
  static int btrfs_dentry_delete(const struct dentry *dentry)
  {
-@@ -5436,7 +5476,7 @@ int btrfs_write_inode(struct inode *inode, struct writeback_control *wbc)
-  * FIXME, needs more benchmarking...there are no reasons other than performance
-  * to keep or drop this code.
-  */
--static int btrfs_dirty_inode(struct inode *inode)
-+int btrfs_dirty_inode(struct inode *inode)
- {
- 	struct btrfs_root *root = BTRFS_I(inode)->root;
- 	struct btrfs_trans_handle *trans;
-@@ -5465,6 +5505,7 @@ static int btrfs_dirty_inode(struct inode *inode)
- 
- 	return ret;
- }
-+EXPORT_SYMBOL(btrfs_dirty_inode);
- 
- /*
-  * This is a copy of file_update_time.  We need this so we can return error on
 @@ -5583,6 +5624,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
  	struct btrfs_inode_ref *ref;
  	struct btrfs_key key[2];
@@ -1007,7 +972,7 @@ index b65e871..b1e96b4 100644
  
  	btrfs_mark_buffer_dirty(path->nodes[0]);
  	btrfs_free_path(path);
-@@ -8959,6 +9008,349 @@ static int btrfs_permission(struct inode *inode, int mask)
+@@ -8959,6 +9008,350 @@ static int btrfs_permission(struct inode *inode, int mask)
  	return generic_permission(inode, mask);
  }
  
@@ -1353,6 +1318,7 @@ index b65e871..b1e96b4 100644
 +	return ret;
 +}
 +EXPORT_SYMBOL(btrfs_punch);
++
 +
  const struct inode_operations_wrapper btrfs_dir_inode_operations = {
  	.ops = {

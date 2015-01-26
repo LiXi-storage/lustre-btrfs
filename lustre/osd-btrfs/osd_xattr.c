@@ -100,9 +100,17 @@ static int osd_object_version_get(const struct lu_env *env,
  */
 static void osd_object_version_set(const struct lu_env *env,
 				   struct dt_object *dt,
-				   dt_obj_version_t *new_version)
+				   dt_obj_version_t *new_version,
+				   struct thandle *th)
 {
 	struct inode *inode = osd_dt_obj(dt)->oo_inode;
+        struct osd_thandle *oh;
+
+        LASSERT(inode);
+        LASSERT(th != NULL);
+
+	oh = container_of0(th, struct osd_thandle, ot_super);
+	LASSERT(oh->ot_handle != NULL);
 
 	CDEBUG(D_INODE, "Set version "LPX64" (old "LPX64") for inode %lu\n",
 	       *new_version, inode->i_version, inode->i_ino);
@@ -111,7 +119,7 @@ static void osd_object_version_set(const struct lu_env *env,
 	/** Version is set after all inode operations are finished,
 	 *  so we should mark it dirty here */
 	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
-	lbtrfs_dirty_inode(inode);
+	lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(inode)->root, inode);
 }
 
 /*
@@ -176,7 +184,7 @@ int osd_xattr_set(const struct lu_env *env, struct dt_object *dt,
 		/* for version we are just using xattr API but change inode
 		* field instead */
 		LASSERT(buf->lb_len == sizeof(dt_obj_version_t));
-		osd_object_version_set(env, dt, buf->lb_buf);
+		osd_object_version_set(env, dt, buf->lb_buf, handle);
 		return sizeof(dt_obj_version_t);
 	}
 

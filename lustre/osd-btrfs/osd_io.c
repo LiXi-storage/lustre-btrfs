@@ -41,6 +41,8 @@
 #include <libcfs/libcfs.h>
 #include "osd_internal.h"
 
+#define LIXI_RESERVE 1
+
 static ssize_t osd_declare_write(const struct lu_env *env, struct dt_object *dt,
 				 const struct lu_buf *buf, loff_t _pos,
 				 struct thandle *handle)
@@ -298,6 +300,9 @@ static int osd_bufs_put(const struct lu_env *env, struct dt_object *dt,
 		if (lnb[i].lnb_page == NULL)
 			continue;
 		LASSERT(PageLocked(lnb[i].lnb_page));
+		///* btrfs_writepage_start_hook() checks whether PageChecked() is cleared,
+		// * so need to calls ClearPageChecked() like btrfs_drop_pages() does */
+		//ClearPageChecked(lnb[i].lnb_page);
 		unlock_page(lnb[i].lnb_page);
 		page_cache_release(lnb[i].lnb_page);
 		lu_object_put(env, &dt->do_lu);
@@ -397,6 +402,7 @@ static int osd_write_prep(const struct lu_env *env, struct dt_object *dt,
 	__s64                   maxidx;
 	int                     rc = 0;
 	int                     i;
+	u64			reserve_bytes;
 
 	LASSERT(inode);
 
@@ -442,8 +448,30 @@ static int osd_write_prep(const struct lu_env *env, struct dt_object *dt,
 		}
 	}
 
-	if (iobuf->dr_npages)
-		rc = lbtrfs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
+	reserve_bytes = npages << PAGE_CACHE_SHIFT;
+#ifdef LIXI_RESERVE
+	rc = lbtrfs_check_data_free_space(inode, reserve_bytes);
+	if (rc) {
+		CDEBUG(D_INODE, "no free space, rc = %d\n",  rc);
+		RETURN(rc);
+	}
+	
+	rc = lbtrfs_delalloc_reserve_metadata(inode, reserve_bytes);
+	if (rc) {
+		CDEBUG(D_INODE, "failed to reserve metadata, rc = %d\n",  rc);
+		lbtrfs_free_reserved_data_space(inode, reserve_bytes);
+		RETURN(rc);
+	}
+#endif
+
+	rc = lbtrfs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
+	if (rc)  {
+		CDEBUG(D_INODE, "failed to read inode, rc = %d\n",  rc);
+#ifdef LIXI_RESERVE
+		lbtrfs_delalloc_release_space(inode, reserve_bytes);
+#endif
+		RETURN(rc);
+	}
 
         RETURN(rc);
 }
@@ -455,14 +483,19 @@ static int osd_declare_write_commit(const struct lu_env *env,
 {
 	struct osd_thandle      *oh;
 	int			 rc = 0;
+#ifndef LIXI_RESERVE
 	long long		 space = npages * PAGE_CACHE_SIZE;
+#endif
 	ENTRY;
 
 	LASSERT(handle != NULL);
 	oh = container_of0(handle, struct osd_thandle, ot_super);
 	LASSERT(oh->ot_handle == NULL);
 
+	/* osd_write_prep() has already reserved space */
+#ifndef LIXI_RESERVE
 	osd_trans_declare_op(oh, space / 4096);
+#endif
 
 	RETURN(rc);
 }
@@ -470,7 +503,7 @@ static int osd_declare_write_commit(const struct lu_env *env,
 /* Check if a block is allocated or not */
 static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
                             struct niobuf_local *lnb, int npages,
-                            struct thandle *thandle)
+                            struct thandle *th)
 {
         struct osd_thread_info *oti = osd_oti_get(env);
         struct osd_iobuf *iobuf = &oti->oti_iobuf;
@@ -479,8 +512,13 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
         loff_t isize;
         loff_t current_isize = i_size_read(inode);
         int rc = 0, i;
+        struct osd_thandle *oh;
 
         LASSERT(inode);
+        LASSERT(th != NULL);
+
+	oh = container_of0(th, struct osd_thandle, ot_super);
+	LASSERT(oh->ot_handle != NULL);
 
 	rc = osd_init_iobuf(osd, iobuf, 1, npages);
 	if (unlikely(rc != 0))
@@ -515,23 +553,30 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 		SetPageUptodate(lnb[i].lnb_page);
 
 		osd_iobuf_add_page(iobuf, lnb[i].lnb_page);
-        }
+	}
 
-#ifdef LIXI
-        if (OBD_FAIL_CHECK(OBD_FAIL_OST_MAPBLK_ENOSPC)) {
-                rc = -ENOSPC;
-        }
-#endif /* LIXI */
 	/*
 	 * __extent_writepage() requires that the page indexes
-	 * are in the range of inode size.
+	 * are in the range of inode size. TODO: remove me
 	 */
 	if (isize > current_isize)
 		i_size_write(inode, isize);
 
-	if (iobuf->dr_npages > 0)
+	if (iobuf->dr_npages > 0) {
+		/* TODO LIXI: find continuous extents and free redundant space */
+		rc = lbtrfs_dirty_pages(LBTRFS_I(inode)->root, inode,
+					iobuf->dr_pages, iobuf->dr_npages,
+					page_offset(lnb[0].lnb_page),
+					(iobuf->dr_npages) << PAGE_CACHE_SHIFT, NULL);
+		if (rc) {
+			CDEBUG(D_INODE, "failed to dirty page [%d], "
+			       "rc = %d\n",  i, rc);
+			RETURN(rc);
+		}
+
 		rc = lbtrfs_write_commit(inode, iobuf->dr_pages,
 					 iobuf->dr_npages);
+	}
 
 	if (likely(rc == 0)) {
 		if (isize > current_isize) {
@@ -539,8 +584,11 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 			/*
 			 * No s_op->dirty_inode() is defined,
 			 * so can't use ll_dirty_inode()
+			 * We can't call btrfs_dirty_inode() in transaction,
+			 * because it might start a transaction.
+			 * So change to btrfs_update_inode() instead.
 			 */
-			lbtrfs_dirty_inode(inode);
+			lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(inode)->root, inode);
                 }      
 	} else {
 		/* Recover the inode size if write fails */
