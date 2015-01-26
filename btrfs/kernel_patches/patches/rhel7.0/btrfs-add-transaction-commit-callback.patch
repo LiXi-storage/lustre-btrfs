@@ -73,6 +73,14 @@ Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/transaction.c
  	list_add_tail(&cur_trans->list, &fs_info->trans_list);
  	extent_io_tree_init(&cur_trans->dirty_pages,
  			     fs_info->btree_inode->i_mapping);
+@@ -781,6 +831,7 @@ int btrfs_end_transaction(struct btrfs_t
+ {
+ 	return __btrfs_end_transaction(trans, root, 0);
+ }
++EXPORT_SYMBOL(btrfs_end_transaction);
+ 
+ int btrfs_end_transaction_throttle(struct btrfs_trans_handle *trans,
+ 				   struct btrfs_root *root)
 Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/transaction.h
 ===================================================================
 --- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/transaction.h
@@ -91,7 +99,7 @@ Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
 ===================================================================
 --- linux-3.10.0-123.el7.x86_64_patch.orig/fs/btrfs/btrfs_inode.h
 +++ linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
-@@ -302,4 +302,22 @@ extern const struct file_operations btrf
+@@ -302,4 +302,24 @@ extern const struct file_operations btrf
  extern const struct address_space_operations btrfs_aops;
  extern const struct address_space_operations btrfs_symlink_aops;
  extern struct extent_io_ops btrfs_extent_io_ops;
@@ -107,6 +115,8 @@ Index: linux-3.10.0-123.el7.x86_64_patch/fs/btrfs/btrfs_inode.h
 +	/* user data goes here */
 +};
 +
++int btrfs_end_transaction(struct btrfs_trans_handle *trans,
++			  struct btrfs_root *root);
 +void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
 +				    void (*function)(struct btrfs_trans_cb_entry *entry,
 +						     int error),
