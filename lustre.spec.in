@@ -2,6 +2,7 @@
 
 # Declare rpmbuild --with/--without parameters
 %bcond_without servers
+%bcond_without btrfs
 %bcond_without ldiskfs
 %bcond_with zfs
 %bcond_without lustre_tests
@@ -11,8 +12,9 @@
 %bcond_with lnet_dlc
 
 %if %{without servers}
-    # --without servers overrides --with {ldiskfs|zfs}
+    # --without servers overrides --with {btrfs|ldiskfs|zfs}
     # so undefine the internal variables set by bcond_*
+    %undefine with_btrfs
     %undefine with_ldiskfs
     %undefine with_zfs
 %endif
@@ -148,6 +150,22 @@ Group: Development/Kernel
 
 %description modules
 Lustre file system, server and network drivers for Linux %{kversion}.
+
+%if %{with btrfs}
+%package osd-btrfs
+Summary: osd-btrfs contains osd interface of btrfs in Lustre.
+Requires: lustre-modules = %{version}
+Requires: module-init-tools >= 3.9
+Provides: lustre-osd
+Group: Development/Kernel
+
+%description osd-btrfs
+The Lustre Object Storage Device (OSD) API is the interface to access and
+modify data that is supposed to be stored persistently. This API is the interface
+to code that bridges individual file systems. This specific package provides an
+implementation of the OSD API for using the Btrfs filesystem as the underlying
+backing store of a Lustre server.
+%endif
 
 %if %{with ldiskfs}
 %package osd-ldiskfs
@@ -334,6 +352,7 @@ fi
 	%{?with_lustre_modules:--enable-modules}%{!?with_lustre_modules:--disable-modules} \
 	%{!?with_lustre_iokit:--disable-iokit} \
 	%{!?with_ldiskfs:--disable-ldiskfs} \
+	%{!?with_btrfs:--disable-btrfs} \
 	%{!?with_servers:--disable-server} \
 	%{!?with_zfs:--without-zfs} \
 	%{!?with_lnet_dlc:--disable-dlc} \
@@ -413,6 +432,9 @@ if [ -f $POST_SCRIPT ]; then
 	cp -f $POST_SCRIPT $RPM_BUILD_ROOT/%{rpm_post_base}.sh
 	echo '%attr(0555, root, root) %{rpm_post_base}.sh' >>lustre.files
 	cp -f $POST_SCRIPT $RPM_BUILD_ROOT/%{rpm_post_base}-modules.sh
+%if %{with btrfs}
+	cp -f $POST_SCRIPT $RPM_BUILD_ROOT/%{rpm_post_base}-osd-btrfs.sh
+%endif
 %if %{with ldiskfs}
 	cp -f $POST_SCRIPT $RPM_BUILD_ROOT/%{rpm_post_base}-osd-ldiskfs.sh
 %if %{with lustre_utils}
@@ -478,6 +500,9 @@ find $RPM_BUILD_ROOT%{?rootdir}/lib/modules/%{kversion}/%{kmoddir} \
 %if %{with lustre_tests}
 %exclude %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/llog_test.ko
 %endif
+%if %{with btrfs}
+%exclude %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/osd_btrfs.ko
+%endif
 %if %{with ldiskfs}
 %exclude %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/ldiskfs.ko
 %exclude %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/osd_ldiskfs.ko
@@ -491,6 +516,18 @@ find $RPM_BUILD_ROOT%{?rootdir}/lib/modules/%{kversion}/%{kmoddir} \
 %doc COPYING
 %doc ChangeLog-lustre
 %doc ChangeLog-lnet
+
+%if %{with btrfs}
+%files osd-btrfs
+%defattr(-,root,root)
+%{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/osd_btrfs.ko
+%if %{with lustre_utils}
+%{_libdir}/@PACKAGE@/mount_osd_btrfs.so
+%endif
+%if %{defined rpm_post_base}
+%attr(0555, root, root) %{rpm_post_base}-osd-btrfs.sh
+%endif
+%endif
 
 %if %{with ldiskfs}
 %files osd-ldiskfs
@@ -620,6 +657,49 @@ if sysctl kernel.unsupported >/dev/null 2>&1 &&
 fi
 %endif
 
+%if %{with btrfs}
+%post osd-btrfs
+%if %{defined rpm_post_base}
+if [ -x %{rpm_post_base}-osd-btrfs.sh ]; then
+	%{rpm_post_base}-osd-btrfs.sh %{cross_path} create
+fi
+%else
+if [ -f /boot/System.map-%{kversion} ]; then
+       depmod -ae -F /boot/System.map-%{kversion} %{kversion} || exit 0
+else
+       depmod -ae %{kversion} || exit 0
+fi
+
+OSD_BTRFS_RPM_NAME=$(rpm -q %{name}-osd-btrfs | grep "%{version}-%{release}")
+# "weak modules" support
+# Suse
+if [ -x /usr/lib/module-init-tools/weak-modules ]; then
+    rpm -ql $OSD_BTRFS_RPM_NAME | grep '\.ko$' |
+        /usr/lib/module-init-tools/weak-modules --add-modules
+fi
+# RedHat
+if [ -x /sbin/weak-modules ]; then
+    rpm -ql $OSD_BTRFS_RPM_NAME | grep '\.ko$' |
+        /sbin/weak-modules --add-modules
+fi
+
+# If the kernel was built to reject unsupported modules (e.g. not a Lustre
+# kernel), and this hasn't been overridden in /etc/modprobe.d yet, then
+# print a warning so that users are aware of this issue.
+if sysctl kernel.unsupported >/dev/null 2>&1 &&
+   [ "$(sysctl -n kernel.unsupported 2>/dev/null)" = "0" ] &&
+    ! modprobe -c | grep -q "^allow_unsupported_modules[ \t]1" ; then
+     echo "
+     warning: the Lustre modules are not supported by Novell. To use Lustre
+              on this system, you should put
+
+     allow_unsupported_modules 1
+
+     into /etc/modprobe.d/unsupported_modules"
+fi
+%endif
+%endif
+
 %if %{with ldiskfs}
 %post osd-ldiskfs
 %if %{defined rpm_post_base}
@@ -728,6 +808,18 @@ MODULES_RPM_NAME=$(rpm -q %{name}-modules | grep "%{version}-%{release}")
 rpm -ql $MODULES_RPM_NAME | grep '\.ko$' > /var/run/%{name}-modules || true
 %endif
 
+%if %{with btrfs}
+%preun osd-btrfs
+%if %{defined rpm_post_base}
+if [ -x %{rpm_post_base}-osd-btrfs.sh ]; then
+	%{rpm_post_base}-osd-btrfs.sh %{cross_path} remove
+fi
+%else
+OSD_BTRFS_RPM_NAME=$(rpm -q %{name}-osd-btrfs | grep "%{version}-%{release}")
+rpm -ql $OSD_BTRFS_RPM_NAME | grep '\.ko$' > /var/run/%{name}-osd-btrfs || true
+%endif
+%endif
+
 %if %{with ldiskfs}
 %preun osd-ldiskfs
 %if %{defined rpm_post_base}
@@ -784,6 +876,28 @@ if [ -x /sbin/weak-modules ]; then
         /sbin/weak-modules --remove-modules
 fi
 rm /var/run/%{name}-modules
+
+%if %{with btrfs}
+%postun osd-btrfs
+if [ -f /boot/System.map-%{kversion} ]; then
+       depmod -ae -F /boot/System.map-%{kversion} %{kversion} || exit 0
+else
+       depmod -ae %{kversion} || exit 0
+fi
+
+# "weak modules" support
+# Suse
+if [ -x /usr/lib/module-init-tools/weak-modules ]; then
+    cat /var/run/%{name}-osd-btrfs |
+        /usr/lib/module-init-tools/weak-modules --remove-modules
+fi
+# RedHat
+if [ -x /sbin/weak-modules ]; then
+    cat /var/run/%{name}-osd-btrfs |
+        /sbin/weak-modules --remove-modules
+fi
+rm /var/run/%{name}-osd-btrfs
+%endif
 
 %if %{with ldiskfs}
 %postun osd-ldiskfs

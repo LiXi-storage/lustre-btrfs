@@ -123,6 +123,13 @@ lr_reader_SOURCES = lr_reader.c
 
 if UTILS
 
+if BTRFS_ENABLED
+pkglib_LTLIBRARIES += mount_osd_btrfs.la
+
+mount_osd_btrfs_la_SOURCES = mount_utils_btrfs.c
+mount_osd_btrfs_la_LDFLAGS = -shared -export-dynamic -module -avoid-version
+endif
+
 if ZFS_ENABLED
 pkglib_LTLIBRARIES += mount_osd_zfs.la
 
