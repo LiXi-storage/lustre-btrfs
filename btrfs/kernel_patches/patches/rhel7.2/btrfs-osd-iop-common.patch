@@ -822,7 +822,7 @@ index e3aedbf..e365eee 100644
  		ret = cow_file_range(inode, locked_page, cow_start, end,
 -				     page_started, nr_written, 1);
 +				     page_started, nr_written, 1,
-+				     NULL, 0);
++				     locked_pages, locked_page_num);
  		if (ret)
  			goto error;
  	}
