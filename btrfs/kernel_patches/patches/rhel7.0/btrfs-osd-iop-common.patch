@@ -1,4 +1,4 @@
-From adb3d8abb82f84befdb2a25e20ef7117842cbb7c Mon Sep 17 00:00:00 2001
+From 70c5c72f5b1390e9bc5a52e50985dbe6be93877e Mon Sep 17 00:00:00 2001
 From: Wang Shilong <wangshilong1991@gmail.com>
 Date: Tue, 17 Mar 2015 10:13:37 -0400
 Subject: [PATCH] btrfs osd iop common
@@ -584,10 +584,10 @@ index ccc264e..e1d9360 100644
  btrfs_bio_alloc(struct block_device *bdev, u64 first_sector, int nr_vecs,
  		gfp_t gfp_flags);
 diff --git a/fs/btrfs/file.c b/fs/btrfs/file.c
-index 464bb23..09f250d 100644
+index cdf4feb..f9bdaf4 100644
 --- a/fs/btrfs/file.c
 +++ b/fs/btrfs/file.c
-@@ -532,6 +532,7 @@ int btrfs_dirty_pages(struct btrfs_root *root, struct inode *inode,
+@@ -531,6 +531,7 @@ int btrfs_dirty_pages(struct btrfs_root *root, struct inode *inode,
  		i_size_write(inode, end_pos);
  	return 0;
  }
@@ -596,7 +596,7 @@ index 464bb23..09f250d 100644
  /*
   * this drops all the extents in the cache that intersect the range
 diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
-index b65e871..3e20e79 100644
+index b65e871..f20c232 100644
 --- a/fs/btrfs/inode.c
 +++ b/fs/btrfs/inode.c
 @@ -89,13 +89,14 @@ static int btrfs_finish_ordered_io(struct btrfs_ordered_extent *ordered_extent);
@@ -809,7 +809,7 @@ index b65e871..3e20e79 100644
  		ret = cow_file_range(inode, locked_page, cow_start, end,
 -				     page_started, nr_written, 1);
 +				     page_started, nr_written, 1,
-+				     NULL, 0);
++				     locked_pages, locked_page_num);
  		if (ret)
  			goto error;
  	}

@@ -299,11 +299,13 @@ static int osd_bufs_put(const struct lu_env *env, struct dt_object *dt,
 	for (i = 0; i < npages; i++) {
 		if (lnb[i].lnb_page == NULL)
 			continue;
-		LASSERT(PageLocked(lnb[i].lnb_page));
+		//LASSERT(PageLocked(lnb[i].lnb_page));
 		///* btrfs_writepage_start_hook() checks whether PageChecked() is cleared,
 		// * so need to calls ClearPageChecked() like btrfs_drop_pages() does */
 		//ClearPageChecked(lnb[i].lnb_page);
-		unlock_page(lnb[i].lnb_page);
+		/* todo, this is a walkaround fix */
+		if (PageLocked(lnb[i].lnb_page))
+			unlock_page(lnb[i].lnb_page);
 		page_cache_release(lnb[i].lnb_page);
 		lu_object_put(env, &dt->do_lu);
 		lnb[i].lnb_page = NULL;
