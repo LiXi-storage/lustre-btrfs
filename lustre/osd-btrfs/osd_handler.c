@@ -410,7 +410,7 @@ int osd_statfs(const struct lu_env *env, struct dt_device *d,
 		ksfs = &osd_oti_get(env)->oti_ksfs;
 	}
 
-	spin_lock(&osd->od_osfs_lock);
+	mutex_lock(&osd->od_osfs_lock);
 	result = sb->s_op->statfs(sb->s_root, ksfs);
 	if (likely(result == 0)) { /* N.B. statfs can't really fail */
 		statfs_pack(sfs, ksfs);
@@ -418,7 +418,7 @@ int osd_statfs(const struct lu_env *env, struct dt_device *d,
 			sfs->os_state = OS_STATE_READONLY;
 	}
 
-	spin_unlock(&osd->od_osfs_lock);
+	mutex_unlock(&osd->od_osfs_lock);
 
 	if (unlikely(env == NULL))
                 OBD_FREE_PTR(ksfs);
@@ -646,7 +646,7 @@ static int osd_device_init0(const struct lu_env *env,
 	l->ld_ops = &osd_lu_ops;
 	o->od_dt_dev.dd_ops = &osd_dt_ops;
 
-	spin_lock_init(&o->od_osfs_lock);
+	mutex_init(&o->od_osfs_lock);
 #ifdef LIXI
 	mutex_init(&o->od_otable_mutex);
 #endif /* LIXI */
@@ -872,9 +872,9 @@ static int osd_obd_connect(const struct lu_env *env, struct obd_export **exp,
 
 	*exp = class_conn2export(&conn);
 
-	spin_lock(&osd->od_osfs_lock);
+	mutex_lock(&osd->od_osfs_lock);
 	osd->od_connects++;
-	spin_unlock(&osd->od_osfs_lock);
+	mutex_unlock(&osd->od_osfs_lock);
 
 	RETURN(0);
 }
@@ -891,11 +891,11 @@ static int osd_obd_disconnect(struct obd_export *exp)
 	ENTRY;
 
 	/* Only disconnect the underlying layers on the final disconnect. */
-	spin_lock(&osd->od_osfs_lock);
+	mutex_lock(&osd->od_osfs_lock);
 	osd->od_connects--;
 	if (osd->od_connects == 0)
 		release = 1;
-	spin_unlock(&osd->od_osfs_lock);
+	mutex_unlock(&osd->od_osfs_lock);
 
 	rc = class_disconnect(exp); /* bz 9811 */
 

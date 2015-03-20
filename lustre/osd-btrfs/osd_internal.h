@@ -122,7 +122,7 @@ struct osd_device {
 	char			 od_mntdev[MAX_OBD_NAME];
 	int			 od_connects;
 	struct lu_site		 od_site;
-	spinlock_t		 od_osfs_lock;
+	struct mutex		 od_osfs_lock;
 	struct hlist_head	*od_capa_hash;
 	unsigned int		 od_is_ost:1;
 	struct proc_dir_entry	*od_proc_entry;
