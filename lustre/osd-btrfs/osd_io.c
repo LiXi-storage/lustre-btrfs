@@ -502,6 +502,64 @@ static int osd_declare_write_commit(const struct lu_env *env,
 	RETURN(rc);
 }
 
+
+static void osd_iobuf_add_page_sort(struct osd_iobuf *iobuf, struct page *page)
+{
+	int start, end, mid;
+	LASSERT(iobuf->dr_npages < iobuf->dr_max_pages);
+	iobuf->dr_pages[iobuf->dr_npages++] = page;
+
+	end = iobuf->dr_npages - 1;
+	if (end == 0)
+		return;
+	if (likely(page_offset(iobuf->dr_pages[end]) >
+	    page_offset(iobuf->dr_pages[end - 1])))
+		return;
+
+	start = 0;
+	mid = (start + end) / 2;
+	while (start < end) {
+		if (page_offset(iobuf->dr_pages[mid]) <
+		    page_offset(iobuf->dr_pages[iobuf->dr_npages - 1]))
+			start = mid + 1;
+		else
+			end = mid;
+		mid = (start + end) / 2;
+	}
+	memmove(iobuf->dr_pages + mid + 1, iobuf->dr_pages + mid,
+		(iobuf->dr_npages - mid) * sizeof(struct page *));
+	iobuf->dr_pages[mid] = page;
+	return;
+}
+
+static int osd_iobuf_dirty_pages(struct osd_iobuf *iobuf,
+				  struct inode *inode)
+{
+	int i;
+	int rc = 0;
+	int start = 1;
+	int npage = iobuf->dr_npages;
+
+	while (npage > 0) {
+		for (i = start; i < iobuf->dr_npages; i++) {
+			if ((page_offset(iobuf->dr_pages[i - 1])
+			    + PAGE_CACHE_SIZE) == page_offset(iobuf->dr_pages[i]))
+				continue;
+			else
+				break;
+		}
+		rc = lbtrfs_dirty_pages(LBTRFS_I(inode)->root, inode,
+				iobuf->dr_pages + start - 1, i - start + 1,
+				page_offset(iobuf->dr_pages[start - 1]),
+				(i - start + 1) << PAGE_CACHE_SHIFT, NULL);
+		if (rc)
+			return rc;
+		npage -= (i - start + 1);
+		start = i;
+	}
+	return rc;
+}
+
 /* Check if a block is allocated or not */
 static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
                             struct niobuf_local *lnb, int npages,
@@ -554,7 +612,7 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 
 		SetPageUptodate(lnb[i].lnb_page);
 
-		osd_iobuf_add_page(iobuf, lnb[i].lnb_page);
+		osd_iobuf_add_page_sort(iobuf, lnb[i].lnb_page);
 	}
 
 	/*
@@ -565,11 +623,7 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 		i_size_write(inode, isize);
 
 	if (iobuf->dr_npages > 0) {
-		/* TODO LIXI: find continuous extents and free redundant space */
-		rc = lbtrfs_dirty_pages(LBTRFS_I(inode)->root, inode,
-					iobuf->dr_pages, iobuf->dr_npages,
-					page_offset(lnb[0].lnb_page),
-					(iobuf->dr_npages) << PAGE_CACHE_SHIFT, NULL);
+		rc = osd_iobuf_dirty_pages(iobuf, inode);
 		if (rc) {
 			CDEBUG(D_INODE, "failed to dirty page [%d], "
 			       "rc = %d\n",  i, rc);
