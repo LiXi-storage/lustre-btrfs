@@ -123,6 +123,7 @@ int btrfs_make_lustre(struct mkfs_opts *mop)
 	__u64 device_kb = mop->mo_device_kb;
 	char mkfs_cmd[PATH_MAX];
 	char *dev;
+	char **tmp;
 	int ret;
 
 	if (!(mop->mo_flags & MO_IS_LOOP)) {
@@ -156,6 +157,15 @@ int btrfs_make_lustre(struct mkfs_opts *mop)
 	strscat(mkfs_cmd, mop->mo_mkfsopts, sizeof(mkfs_cmd));
 	strscat(mkfs_cmd, " ", sizeof(mkfs_cmd));
 	strscat(mkfs_cmd, dev, sizeof(mkfs_cmd));
+
+	tmp = mop->mo_pool_vdevs;
+	/* Append the vdev config */
+	while (tmp && *tmp != NULL) {
+		strscat(mkfs_cmd, " ", PATH_MAX);
+		strscat(mkfs_cmd, *tmp, PATH_MAX);
+
+		tmp++;
+	}
 
 	vprint("mkfs_cmd = %s\n", mkfs_cmd);
 	ret = run_command(mkfs_cmd, sizeof(mkfs_cmd));
