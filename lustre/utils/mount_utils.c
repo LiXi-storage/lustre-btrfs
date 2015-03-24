@@ -927,6 +927,25 @@ static void append_context_for_mount(char *mntpt,
 }
 #endif
 
+
+/* btrfs mutiple devices rely on this */
+static void append_devices_for_mount(struct mkfs_opts *mop)
+{
+	if (mop->mo_pool_vdevs == NULL)
+		return;
+
+	if (strcmp(MT_STR(&mop->mo_ldd), "lbtrfs"))
+		return;
+
+	while (*mop->mo_pool_vdevs != NULL) {
+		strscat((mop->mo_ldd).ldd_mount_opts, ",device=",
+			sizeof((mop->mo_ldd).ldd_mount_opts));
+		strscat((mop->mo_ldd).ldd_mount_opts, *mop->mo_pool_vdevs,
+			sizeof((mop->mo_ldd).ldd_mount_opts));
+		mop->mo_pool_vdevs++;
+	}
+}
+
 /* Write the server config files */
 int filesystem_write_ldd(struct mkfs_opts *mop)
 {
@@ -936,6 +955,7 @@ int filesystem_write_ldd(struct mkfs_opts *mop)
 	FILE *filep;
 	int ret = 0;
 	size_t num;
+	char tmp_mount[4096];
 
 	/* Mount this device temporarily in order to write these files */
 	if (!mkdtemp(mntpt)) {
@@ -956,8 +976,11 @@ int filesystem_write_ldd(struct mkfs_opts *mop)
 	if (mop->mo_flags & MO_IS_LOOP)
 		dev = mop->mo_loopdev;
 
+	memcpy(tmp_mount, mop->mo_ldd.ldd_mount_opts, 4096);
+	append_devices_for_mount(mop);
 	ret = mount(dev, mntpt, MT_STR(&mop->mo_ldd), 0,
 		    mop->mo_ldd.ldd_mount_opts);
+	memcpy(mop->mo_ldd.ldd_mount_opts, tmp_mount, 4096);
 	if (ret) {
 		fprintf(stderr, "%s: Unable to mount %s: %s\n",
 			progname, dev, strerror(errno));
