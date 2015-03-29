@@ -1117,6 +1117,99 @@ static int lod_alloc_ost_list(const struct lu_env *env,
 	RETURN(rc);
 }
 
+/* Allocate objects on OSTs with round-robin algorithm */
+static int lod_alloc_dull_rr(const struct lu_env *env, struct lod_object *lo,
+			     struct dt_object **stripe, int flags,
+			     struct thandle *th)
+{
+	struct lod_device	*m = lu2lod_dev(lo->ldo_obj.do_lu.lo_dev);
+	struct obd_statfs	*sfs = &lod_env_info(env)->lti_osfs;
+	struct pool_desc	*pool = NULL;
+	struct lod_qos_rr	*lqr;
+	struct dt_object	*o;
+	struct ost_pool		*osts;
+	int			 rc;
+	unsigned		 ost_idx;
+	unsigned		 array_idx;
+	unsigned		 ost_count;
+	unsigned		 i;
+	int			 stripe_num = 0;
+	ENTRY;
+
+	rc = lod_qos_ost_in_use_clear(env, lo->ldo_stripenr);
+	if (rc)
+		RETURN(rc);
+
+	if (lo->ldo_pool)
+		pool = lod_find_pool(m, lo->ldo_pool);
+
+	if (pool != NULL) {
+		down_write(&pool_tgt_rw_sem(pool));
+		osts = &(pool->pool_obds);
+		lqr = &(pool->pool_rr);
+	} else {
+		osts = &(m->lod_pool_info);
+		lqr = &(m->lod_qos.lq_rr);
+	}
+
+	/* Do actual allocation, use write lock here. */
+	down_write(&m->lod_qos.lq_rw_sem);
+	ost_count = osts->op_count;
+	array_idx = lqr->lqr_start_idx % ost_count;
+	for (i = 0; i < ost_count;
+			i++, array_idx = (array_idx + 1) % ost_count) {
+		ost_idx = osts->op_array[array_idx];
+		if (!cfs_bitmap_check(m->lod_ost_bitmap, ost_idx))
+			GOTO(out, rc = -EINVAL);
+
+		/* Fail Check before osc_precreate() is called
+		   so we can only 'fail' single OSC. */
+		if (OBD_FAIL_CHECK(OBD_FAIL_MDS_OSC_PRECREATE) && ost_idx == 0)
+			GOTO(out, rc = -EINVAL);
+
+		/*
+		 * do not put >1 objects on a single OST
+		 */
+		LASSERT(!lod_qos_is_ost_used(env, ost_idx, stripe_num));
+
+		rc = lod_statfs_and_check(env, m, ost_idx, sfs);
+		if (rc) {
+			/* this OSP doesn't feel well */
+			GOTO(out, rc);
+		}
+
+		o = lod_qos_declare_object_on(env, m, ost_idx, th);
+		if (IS_ERR(o)) {
+			CDEBUG(D_OTHER, "can't declare new object on #%u: %d\n",
+			       ost_idx, (int) PTR_ERR(o));
+			GOTO(out, rc = PTR_ERR(o));
+		}
+
+		/*
+		 * We've successfuly declared (reserved) an object
+		 */
+		lod_qos_ost_in_use(env, stripe_num, ost_idx);
+		stripe[stripe_num] = o;
+		stripe_num++;
+
+		/* We have enough stripes */
+		if (stripe_num == lo->ldo_stripenr)
+			break;
+	}
+	lqr->lqr_start_idx++;
+	rc = 0;
+out:
+	up_write(&m->lod_qos.lq_rw_sem);
+
+	if (pool != NULL) {
+		up_write(&pool_tgt_rw_sem(pool));
+		/* put back ref got by lod_find_pool() */
+		lod_pool_putref(pool);
+	}
+
+	RETURN(rc);
+}
+
 /**
  * Allocate a striping on a predefined set of OSTs.
  *
@@ -1869,9 +1962,20 @@ int lod_qos_prep_create(const struct lu_env *env, struct lod_object *lo,
 		if (lum != NULL && lum->lmm_magic == LOV_USER_MAGIC_SPECIFIC) {
 			rc = lod_alloc_ost_list(env, lo, stripe, lum, th);
 		} else if (lo->ldo_def_stripe_offset == LOV_OFFSET_DEFAULT) {
-			rc = lod_alloc_qos(env, lo, stripe, flag, th);
-			if (rc == -EAGAIN)
-				rc = lod_alloc_rr(env, lo, stripe, flag, th);
+			switch (d->lod_qos.lq_qos_alloc_policy) {
+			case QOS_ALLOC_POLICY_DEFAULT:
+				rc = lod_alloc_qos(env, lo, stripe, flag, th);
+				if (rc == -EAGAIN)
+					rc = lod_alloc_rr(env, lo,
+							  stripe, flag, th);
+				break;
+			case QOS_ALLOC_POLICY_DULLRR:
+				rc = lod_alloc_dull_rr(env, lo,
+						       stripe, flag, th);
+				break;
+			default:
+				rc = -EINVAL;
+			}
 		} else {
 			rc = lod_alloc_specific(env, lo, stripe, flag, th);
 		}

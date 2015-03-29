@@ -708,6 +708,60 @@ lod_lmv_failout_seq_write(struct file *file, const char *buffer,
 }
 LPROC_SEQ_FOPS(lod_lmv_failout);
 
+static int lod_qos_alloc_policy_seq_show(struct seq_file *m, void *v)
+{
+	struct obd_device *dev = m->private;
+	struct lod_device *lod;
+
+	LASSERT(dev != NULL);
+	lod = lu2lod_dev(dev->obd_lu_dev);
+
+	switch (lod->lod_qos.lq_qos_alloc_policy) {
+	case QOS_ALLOC_POLICY_DEFAULT:
+		return seq_printf(m, "[default] dull_rr\n");
+	case QOS_ALLOC_POLICY_DULLRR:
+		return seq_printf(m, "default [dull_rr]\n");
+	default:
+		break;
+	}
+	return seq_printf(m, "none\n");
+}
+
+static ssize_t
+lod_qos_alloc_policy_seq_write(struct file *file, const char *buffer,
+			       size_t count, loff_t *off)
+{
+	struct seq_file		*m	= file->private_data;
+	struct obd_device	*dev	= m->private;
+	struct lod_device	*lod;
+	char			 kernbuf[32];
+	int			 i = 0;
+
+	LASSERT(dev != NULL);
+	lod = lu2lod_dev(dev->obd_lu_dev);
+
+	if (count > (sizeof(kernbuf) - 1))
+		return -EINVAL;
+	if (copy_from_user(kernbuf, buffer, count))
+		return -EFAULT;
+
+	i = 1;
+	while ((i < count) && (kernbuf[count - i] == '\n')) {
+		kernbuf[count - i] = 0;
+		i++;
+	}
+
+	if (!strncmp(kernbuf, "default", strlen("default")))
+		lod->lod_qos.lq_qos_alloc_policy = QOS_ALLOC_POLICY_DEFAULT;
+	else if (!strncmp(kernbuf, "dull_rr", strlen("dull_rr")))
+		lod->lod_qos.lq_qos_alloc_policy = QOS_ALLOC_POLICY_DULLRR;
+	else
+		return -EINVAL;
+
+	return count;
+}
+LPROC_SEQ_FOPS(lod_qos_alloc_policy);
+
 static struct lprocfs_vars lprocfs_lod_obd_vars[] = {
 	{ .name	=	"uuid",
 	  .fops	=	&lod_uuid_fops		},
@@ -733,6 +787,8 @@ static struct lprocfs_vars lprocfs_lod_obd_vars[] = {
 	  .fops	=	&lod_qos_maxage_fops	},
 	{ .name	=	"lmv_failout",
 	  .fops	=	&lod_lmv_failout_fops	},
+	{ .name	=	"qos_alloc_policy",
+	  .fops	=	&lod_qos_alloc_policy_fops},
 	{ NULL }
 };
 

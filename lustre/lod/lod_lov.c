@@ -1278,6 +1278,7 @@ int lod_pools_init(struct lod_device *lod, struct lustre_cfg *lcfg)
 	lod->lod_qos.lq_prio_free = 232;
 	/* Default threshold for rr (roughly 17%) */
 	lod->lod_qos.lq_threshold_rr = 43;
+	lod->lod_qos.lq_qos_alloc_policy = QOS_ALLOC_POLICY_DEFAULT;
 
 	/* Set up OST pool environment */
 	lod->lod_pools_hash_body = cfs_hash_create("POOLS", HASH_POOLS_CUR_BITS,
