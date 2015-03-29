@@ -1,23 +1,23 @@
-From 10ead8dfee508809782270c490198d2e253a1688 Mon Sep 17 00:00:00 2001
+From 5562f9b3b3c42ac2b5f7ef9132db7b2acf5efa06 Mon Sep 17 00:00:00 2001
 From: Wang Shilong <wangshilong1991@gmail.com>
 Date: Mon, 16 Mar 2015 10:56:45 -0400
 Subject: [PATCH 4/4] btrfs osd iop common
 
 ---
- fs/btrfs/btrfs_inode.h |  18 ++
+ fs/btrfs/btrfs_inode.h |  19 ++
  fs/btrfs/extent-tree.c |   4 +
- fs/btrfs/extent_io.c   | 230 +++++++++++++++++-------
+ fs/btrfs/extent_io.c   | 237 ++++++++++++++++++-------
  fs/btrfs/extent_io.h   |   8 +-
  fs/btrfs/file.c        |   1 +
  fs/btrfs/inode.c       | 469 ++++++++++++++++++++++++++++++++++++++++++++-----
  fs/btrfs/xattr.c       |   1 +
- 7 files changed, 619 insertions(+), 112 deletions(-)
+ 7 files changed, 626 insertions(+), 113 deletions(-)
 
 diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
-index ffe3c14..b92a781 100644
+index ffe3c14..eecdda5 100644
 --- a/fs/btrfs/btrfs_inode.h
 +++ b/fs/btrfs/btrfs_inode.h
-@@ -356,4 +356,22 @@ void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
+@@ -356,4 +356,23 @@ void btrfs_add_transaction_callback(struct btrfs_trans_handle *trans,
  				    struct btrfs_trans_cb_entry *callback);
  bool btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
  					struct btrfs_trans_cb_entry *callback);
@@ -35,7 +35,8 @@ index ffe3c14..b92a781 100644
 +int btrfs_punch(struct inode *inode, struct btrfs_trans_handle *trans,
 +		__u64 start, __u64 end);
 +int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages);
-+int btrfs_write_commit(struct inode *inode, struct page **pages, int nr_pages);
++int btrfs_write_commit(struct inode *inode, loff_t i_size,
++		       struct page **pages, int nr_pages);
 +int __btrfs_setxattr(struct btrfs_trans_handle *trans,
 +		     struct inode *inode, const char *name,
 +		     const void *value, size_t size, int flags);
@@ -77,7 +78,7 @@ index a684086..c9f466c 100644
  static int update_block_group(struct btrfs_root *root,
  			      u64 bytenr, u64 num_bytes, int alloc)
 diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
-index 6afb46a..8a52172 100644
+index 6afb46a..5e4b69a 100644
 --- a/fs/btrfs/extent_io.c
 +++ b/fs/btrfs/extent_io.c
 @@ -1574,9 +1574,24 @@ out:
@@ -373,12 +374,20 @@ index 6afb46a..8a52172 100644
   */
  static int __extent_writepage(struct page *page, struct writeback_control *wbc,
 -			      void *data)
-+			      void *data, int keep_page,
++			      void *data, int keep_page, loff_t i_size,
 +			      struct page **locked_pages, int locked_page_num)
  {
  	struct inode *inode = page->mapping->host;
  	struct extent_page_data *epd = data;
-@@ -3501,36 +3547,36 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+@@ -3485,7 +3531,6 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+ 	int ret;
+ 	int nr = 0;
+ 	size_t pg_offset = 0;
+-	loff_t i_size = i_size_read(inode);
+ 	unsigned long end_index = i_size >> PAGE_CACHE_SHIFT;
+ 	int write_flags;
+ 	unsigned long nr_written = 0;
+@@ -3501,36 +3546,36 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
  
  	ClearPageError(page);
  
@@ -435,7 +444,7 @@ index 6afb46a..8a52172 100644
  	if (ret == 1)
  		goto done_unlocked;
  
-@@ -3544,7 +3590,8 @@ done:
+@@ -3544,7 +3589,8 @@ done:
  		ret = ret < 0 ? ret : -EIO;
  		end_extent_writepage(page, ret, start, page_end);
  	}
@@ -445,38 +454,41 @@ index 6afb46a..8a52172 100644
  	return ret;
  
  done_unlocked:
-@@ -4082,7 +4129,7 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
+@@ -4082,7 +4128,8 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
  		.bio_flags = 0,
  	};
  
 -	ret = __extent_writepage(page, wbc, &epd);
-+	ret = __extent_writepage(page, wbc, &epd, 0, NULL, 0);
++	ret = __extent_writepage(page, wbc, &epd, 0,
++				 i_size_read(page->mapping->host), NULL, 0);
  
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -4116,7 +4163,7 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+@@ -4116,7 +4163,8 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
  	while (start <= end) {
  		page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
  		if (clear_page_dirty_for_io(page))
 -			ret = __extent_writepage(page, &wbc_writepages, &epd);
-+			ret = __extent_writepage(page, &wbc_writepages, &epd, 0, NULL, 0);
++			ret = __extent_writepage(page, &wbc_writepages, &epd, 0,
++						 i_size_read(inode), NULL, 0);
  		else {
  			if (tree->ops && tree->ops->writepage_end_io_hook)
  				tree->ops->writepage_end_io_hook(page, start,
-@@ -4132,6 +4179,12 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+@@ -4132,6 +4180,13 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
  	return ret;
  }
  
 +static int extent_writepage(struct page *page, struct writeback_control *wbc,
 +			    void *data)
 +{
-+	return __extent_writepage(page, wbc, data, 0, NULL, 0);
++	return __extent_writepage(page, wbc, data, 0,
++				  i_size_read(page->mapping->host), NULL, 0);
 +}
 +
  int extent_writepages(struct extent_io_tree *tree,
  		      struct address_space *mapping,
  		      get_extent_t *get_extent,
-@@ -4148,7 +4201,7 @@ int extent_writepages(struct extent_io_tree *tree,
+@@ -4148,7 +4203,7 @@ int extent_writepages(struct extent_io_tree *tree,
  	};
  
  	ret = extent_write_cache_pages(tree, mapping, wbc,
@@ -485,7 +497,7 @@ index 6afb46a..8a52172 100644
  				       flush_write_bio);
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -4182,12 +4235,12 @@ int extent_readpages(struct extent_io_tree *tree,
+@@ -4182,12 +4237,12 @@ int extent_readpages(struct extent_io_tree *tree,
  		if (nr < ARRAY_SIZE(pagepool))
  			continue;
  		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
@@ -500,7 +512,7 @@ index 6afb46a..8a52172 100644
  
  	if (em_cached)
  		free_extent_map(em_cached);
-@@ -5597,3 +5650,56 @@ int try_release_extent_buffer(struct page *page)
+@@ -5597,3 +5652,59 @@ int try_release_extent_buffer(struct page *page)
  
  	return release_extent_buffer(eb);
  }
@@ -524,8 +536,8 @@ index 6afb46a..8a52172 100644
 +}
 +EXPORT_SYMBOL(btrfs_read_prep);
 +
-+int btrfs_write_commit(struct inode *inode, struct page **pages, int nr_pages)//,
-+//		       loff_t pos, size_t write_bytes)
++int btrfs_write_commit(struct inode *inode, loff_t i_size,
++		       struct page **pages, int nr_pages)
 +{
 +	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
 +	struct writeback_control wbc = {
@@ -546,9 +558,12 @@ index 6afb46a..8a52172 100644
 +	for (i = 0; i < nr_pages; i++) {
 +		/* The page could have been commited in earlier iterations, skip it if so */
 +		//if (PageWriteback(pages[i]) || !clear_page_dirty_for_io(pages[i]));
++		/* The page could have been commited in earlier iterations,
++		 * skip it if so */
 +		if(!clear_page_dirty_for_io(pages[i]))
 +		 	continue;
-+		ret = __extent_writepage(pages[i], &wbc, &epd, 1, pages, nr_pages);
++		ret = __extent_writepage(pages[i], &wbc, &epd, 1, i_size,
++					 pages, nr_pages);
 +		if (ret)
 +			break;
 +	}
@@ -596,7 +611,7 @@ index aaca894..427750f 100644
  /*
   * this drops all the extents in the cache that intersect the range
 diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
-index e3aedbf..e365eee 100644
+index e3aedbf..85a55c9 100644
 --- a/fs/btrfs/inode.c
 +++ b/fs/btrfs/inode.c
 @@ -89,15 +89,15 @@ static int btrfs_finish_ordered_io(struct btrfs_ordered_extent *ordered_extent);
