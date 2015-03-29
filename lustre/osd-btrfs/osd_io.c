@@ -570,7 +570,6 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
         struct inode *inode = osd_dt_obj(dt)->oo_inode;
         struct osd_device  *osd = osd_obj2dev(osd_dt_obj(dt));
         loff_t isize;
-        loff_t current_isize = i_size_read(inode);
         int rc = 0, i;
         struct osd_thandle *oh;
 
@@ -615,13 +614,6 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 		osd_iobuf_add_page_sort(iobuf, lnb[i].lnb_page);
 	}
 
-	/*
-	 * __extent_writepage() requires that the page indexes
-	 * are in the range of inode size. TODO: remove me
-	 */
-	if (isize > current_isize)
-		i_size_write(inode, isize);
-
 	if (iobuf->dr_npages > 0) {
 		rc = osd_iobuf_dirty_pages(iobuf, inode);
 		if (rc) {
@@ -630,12 +622,18 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 			RETURN(rc);
 		}
 
-		rc = lbtrfs_write_commit(inode, iobuf->dr_pages,
+		/*
+		 * __extent_writepage() requires that the page indexes
+		 * are in the range of inode size. So, isize is given
+		 * as an argument to walkaround it.
+		 */
+		rc = lbtrfs_write_commit(inode, isize, iobuf->dr_pages,
 					 iobuf->dr_npages);
 	}
 
 	if (likely(rc == 0)) {
-		if (isize > current_isize) {
+		if (isize > i_size_read(inode)) {
+			i_size_write(inode, isize);
 			LBTRFS_I(inode)->disk_i_size = isize;
 			/*
 			 * No s_op->dirty_inode() is defined,
@@ -644,13 +642,13 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 			 * because it might start a transaction.
 			 * So change to btrfs_update_inode() instead.
 			 */
-			lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(inode)->root, inode);
-                }      
+			lbtrfs_update_inode(oh->ot_handle,
+					    LBTRFS_I(inode)->root,
+					    inode);
+		}
 	} else {
-		/* Recover the inode size if write fails */
-		i_size_write(inode, current_isize);
-                /* if write fails, we should drop pages from the cache */
-                for (i = 0; i < npages; i++) {
+		/* if write fails, we should drop pages from the cache */
+		for (i = 0; i < npages; i++) {
 			if (lnb[i].lnb_page == NULL)
 				continue;
 			LASSERT(PageLocked(lnb[i].lnb_page));
