@@ -38,6 +38,7 @@
  */
 
 #include <linux/quotaops.h>
+#include <linux/xattr.h>
 #include <libcfs/libcfs.h>
 #include "osd_internal.h"
 
