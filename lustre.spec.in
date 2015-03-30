@@ -156,6 +156,8 @@ Lustre file system, server and network drivers for Linux %{kversion}.
 Summary: osd-btrfs contains osd interface of btrfs in Lustre.
 Requires: lustre-modules = %{version}
 Requires: module-init-tools >= 3.9
+Requires: btrfs-progs
+Requires: lustre-osd-btrfs-mount
 Provides: lustre-osd
 Group: Development/Kernel
 
@@ -165,6 +167,17 @@ modify data that is supposed to be stored persistently. This API is the interfac
 to code that bridges individual file systems. This specific package provides an
 implementation of the OSD API for using the Btrfs filesystem as the underlying
 backing store of a Lustre server.
+
+%if %{with lustre_utils}
+%package osd-btrfs-mount
+Summary: osd-btrfs-mount contains mount's btrfs specific dso.
+Provides: lustre-osd-mount
+Group: Development/Kernel
+
+%description osd-btrfs-mount
+BTRFS hooks for mount/mkfs into a dynamic library.
+
+%endif
 %endif
 
 %if %{with ldiskfs}
@@ -434,6 +447,9 @@ if [ -f $POST_SCRIPT ]; then
 	cp -f $POST_SCRIPT $RPM_BUILD_ROOT/%{rpm_post_base}-modules.sh
 %if %{with btrfs}
 	cp -f $POST_SCRIPT $RPM_BUILD_ROOT/%{rpm_post_base}-osd-btrfs.sh
+%if %{with lustre_utils}
+	cp -f $POST_SCRIPT $RPM_BUILD_ROOT/%{rpm_post_base}-mount-osd-btrfs.sh
+%endif
 %endif
 %if %{with ldiskfs}
 	cp -f $POST_SCRIPT $RPM_BUILD_ROOT/%{rpm_post_base}-osd-ldiskfs.sh
@@ -523,11 +539,16 @@ find $RPM_BUILD_ROOT%{?rootdir}/lib/modules/%{kversion}/%{kmoddir} \
 %defattr(-,root,root)
 %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/lbtrfs.ko
 %{?rootdir}/lib/modules/%{kversion}/%{kmoddir}/kernel/fs/@PACKAGE@/osd_btrfs.ko
-%if %{with lustre_utils}
-%{_libdir}/@PACKAGE@/mount_osd_btrfs.so
-%endif
 %if %{defined rpm_post_base}
 %attr(0555, root, root) %{rpm_post_base}-osd-btrfs.sh
+%endif
+%if %{with lustre_utils}
+%files osd-btrfs-mount
+%defattr(-,root,root)
+%{_libdir}/@PACKAGE@/mount_osd_btrfs.so
+%if %{defined rpm_post_base}
+%attr(0555, root, root) %{rpm_post_base}-mount-osd-btrfs.sh
+%endif
 %endif
 %endif
 
@@ -700,6 +721,12 @@ if sysctl kernel.unsupported >/dev/null 2>&1 &&
      into /etc/modprobe.d/unsupported_modules"
 fi
 %endif
+%if %{with lustre_utils} && %{defined rpm_post_base}
+%post osd-btrfs-mount
+if [ -x %{rpm_post_base}-mount-osd-btrfs.sh ]; then
+	%{rpm_post_base}-mount-osd-btrfs.sh %{cross_path} create
+fi
+%endif
 %endif
 
 %if %{with ldiskfs}
@@ -819,6 +846,12 @@ fi
 %else
 OSD_BTRFS_RPM_NAME=$(rpm -q %{name}-osd-btrfs | grep "%{version}-%{release}")
 rpm -ql $OSD_BTRFS_RPM_NAME | grep '\.ko$' > /var/run/%{name}-osd-btrfs || true
+%endif
+%if %{with lustre_utils} && %{defined rpm_post_base}
+%preun osd-btrfs-mount
+if [ -x %{rpm_post_base}-mount-osd-btrfs.sh ]; then
+	%{rpm_post_base}-mount-osd-btrfs.sh %{cross_path} remove
+fi
 %endif
 %endif
 
