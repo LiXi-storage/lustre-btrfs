@@ -574,8 +574,7 @@ static int osd_object_ref_del(const struct lu_env *env, struct dt_object *dt,
 	CDEBUG(D_INODE, DFID" decrease nlink %d\n",
 	       PFID(lu_object_fid(&dt->do_lu)), inode->i_nlink);
 
-	if (!S_ISDIR(inode->i_mode) || inode->i_nlink > 2)
-		drop_nlink(inode);
+	drop_nlink(inode);
 	spin_unlock(&obj->oo_guard);
 
 	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
