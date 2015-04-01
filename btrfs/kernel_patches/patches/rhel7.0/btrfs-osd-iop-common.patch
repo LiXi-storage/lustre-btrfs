@@ -17,7 +17,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/btrfs_inode.h
 ===================================================================
 --- linux-3.10.0-229.el7.centos.x86_64_btrfs_patch.orig/fs/btrfs/btrfs_inode.h
 +++ linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/btrfs_inode.h
-@@ -328,4 +328,22 @@ void btrfs_add_transaction_callback(stru
+@@ -328,4 +328,23 @@ void btrfs_add_transaction_callback(stru
  				    struct btrfs_trans_cb_entry *callback);
  bool btrfs_try_del_transaction_callback(struct btrfs_trans_handle *trans,
  					struct btrfs_trans_cb_entry *callback);
@@ -33,7 +33,8 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/btrfs_inode.h
 +		    u64 *index);
 +int btrfs_punch(struct inode *inode, struct btrfs_trans_handle *trans,
 +		__u64 start, __u64 end);
-+int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages);
++int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages,
++		    wait_queue_head_t *wait, atomic_t *numreqs);
 +int btrfs_write_commit(struct inode *inode, loff_t i_size,
 +		       struct page **pages, int nr_pages);
 +int __btrfs_setxattr(struct btrfs_trans_handle *trans,
@@ -228,17 +229,113 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  			page_cache_release(pages[i]);
  		}
  		nr_pages -= ret;
-@@ -2802,7 +2835,8 @@ static int __do_readpage(struct extent_i
+@@ -2555,7 +2588,9 @@ readpage_ok:
+ 			ClearPageUptodate(page);
+ 			SetPageError(page);
+ 		}
+-		unlock_page(page);
++		if (!page_is_locked(io_bio->locked_pages,
++				    io_bio->locked_page_num, page))
++			unlock_page(page);
+ 		offset += len;
+ 
+ 		if (unlikely(!uptodate)) {
+@@ -2584,6 +2619,10 @@ readpage_ok:
+ 	if (extent_len)
+ 		endio_readpage_release_extent(tree, extent_start, extent_len,
+ 					      uptodate);
++
++	if (io_bio->numreqs && atomic_dec_and_test(io_bio->numreqs))
++		wake_up(io_bio->wait);
++
+ 	if (io_bio->end_io)
+ 		io_bio->end_io(io_bio, err);
+ 	bio_put(bio);
+@@ -2617,6 +2656,10 @@ btrfs_bio_alloc(struct block_device *bde
+ 		btrfs_bio->csum = NULL;
+ 		btrfs_bio->csum_allocated = NULL;
+ 		btrfs_bio->end_io = NULL;
++		btrfs_bio->locked_pages = NULL;
++		btrfs_bio->locked_page_num = 0;
++	    	btrfs_bio->numreqs = NULL;
++		btrfs_bio->wait = NULL;
+ 	}
+ 	return bio;
+ }
+@@ -2693,7 +2736,11 @@ static int submit_extent_page(int rw, st
+ 			      bio_end_io_t end_io_func,
+ 			      int mirror_num,
+ 			      unsigned long prev_bio_flags,
+-			      unsigned long bio_flags)
++			      unsigned long bio_flags,
++			      struct page **locked_pages,
++			      int locked_page_num,
++			      wait_queue_head_t *wait,
++			      atomic_t *numreqs)
+ {
+ 	int ret = 0;
+ 	struct bio *bio;
+@@ -2702,6 +2749,7 @@ static int submit_extent_page(int rw, st
+ 	int this_compressed = bio_flags & EXTENT_BIO_COMPRESSED;
+ 	int old_compressed = prev_bio_flags & EXTENT_BIO_COMPRESSED;
+ 	size_t page_size = min_t(size_t, size, PAGE_CACHE_SIZE);
++	struct btrfs_io_bio *io_bio;
+ 
+ 	if (bio_ret && *bio_ret) {
+ 		bio = *bio_ret;
+@@ -2717,6 +2765,8 @@ static int submit_extent_page(int rw, st
+ 					     prev_bio_flags);
+ 			if (ret < 0)
+ 				return ret;
++			if (numreqs)
++				atomic_inc(numreqs);
+ 			bio = NULL;
+ 		} else {
+ 			return 0;
+@@ -2734,11 +2784,19 @@ static int submit_extent_page(int rw, st
+ 	bio_add_page(bio, page, page_size, offset);
+ 	bio->bi_end_io = end_io_func;
+ 	bio->bi_private = tree;
++	io_bio = btrfs_io_bio(bio);
++	io_bio->locked_pages = locked_pages;
++	io_bio->locked_page_num = locked_page_num;
++	io_bio->numreqs = numreqs;
++	io_bio->wait = wait;
+ 
+ 	if (bio_ret)
+ 		*bio_ret = bio;
+-	else
++	else {
+ 		ret = submit_one_bio(rw, bio, mirror_num, bio_flags);
++		if (ret == 0 && numreqs)
++			atomic_inc(numreqs);
++	}
+ 
+ 	return ret;
+ }
+@@ -2802,7 +2860,10 @@ static int __do_readpage(struct extent_i
  			 get_extent_t *get_extent,
  			 struct extent_map **em_cached,
  			 struct bio **bio, int mirror_num,
 -			 unsigned long *bio_flags, int rw)
 +			 unsigned long *bio_flags, int rw,
-+			 int keep_page)
++			 int keep_page, struct page **locked_pages,
++			 int locked_page_num, wait_queue_head_t *wait,
++			 atomic_t *numreqs)
  {
  	struct inode *inode = page->mapping->host;
  	u64 start = page_offset(page);
-@@ -2965,7 +2999,8 @@ out:
+@@ -2949,7 +3010,8 @@ static int __do_readpage(struct extent_i
+ 					 bdev, bio, pnr,
+ 					 end_bio_extent_readpage, mirror_num,
+ 					 *bio_flags,
+-					 this_bio_flag);
++					 this_bio_flag, locked_pages,
++					 locked_page_num, wait, numreqs);
+ 		if (!ret) {
+ 			nr++;
+ 			*bio_flags = this_bio_flag;
+@@ -2965,7 +3027,8 @@ out:
  	if (!nr) {
  		if (!PageError(page))
  			SetPageUptodate(page);
@@ -248,75 +345,87 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  	}
  	return 0;
  }
-@@ -2976,7 +3011,8 @@ static inline void __do_contiguous_readp
+@@ -2976,7 +3039,12 @@ static inline void __do_contiguous_readp
  					     get_extent_t *get_extent,
  					     struct extent_map **em_cached,
  					     struct bio **bio, int mirror_num,
 -					     unsigned long *bio_flags, int rw)
 +					     unsigned long *bio_flags, int rw,
-+					     int keep_page)
++					     int keep_page,
++					     struct page **locked_pages,
++					     int locked_page_num,
++					     wait_queue_head_t *wait,
++					     atomic_t *numreqs)
  {
  	struct inode *inode;
  	struct btrfs_ordered_extent *ordered;
-@@ -2996,8 +3032,9 @@ static inline void __do_contiguous_readp
+@@ -2996,8 +3064,10 @@ static inline void __do_contiguous_readp
  
  	for (index = 0; index < nr_pages; index++) {
  		__do_readpage(tree, pages[index], get_extent, em_cached, bio,
 -			      mirror_num, bio_flags, rw);
 -		page_cache_release(pages[index]);
-+			      mirror_num, bio_flags, rw, keep_page);
++			      mirror_num, bio_flags, rw, keep_page,
++			      locked_pages, locked_page_num, wait, numreqs);
 +		if (!keep_page)
 +			page_cache_release(pages[index]);
  	}
  }
  
-@@ -3006,7 +3043,8 @@ static void __extent_readpages(struct ex
+@@ -3006,7 +3076,9 @@ static void __extent_readpages(struct ex
  			       int nr_pages, get_extent_t *get_extent,
  			       struct extent_map **em_cached,
  			       struct bio **bio, int mirror_num,
 -			       unsigned long *bio_flags, int rw)
 +			       unsigned long *bio_flags, int rw,
-+			       int keep_page)
++			       int keep_page, wait_queue_head_t *wait,
++			       atomic_t *numreqs)
  {
  	u64 start = 0;
  	u64 end = 0;
-@@ -3027,7 +3065,7 @@ static void __extent_readpages(struct ex
+@@ -3027,7 +3099,10 @@ static void __extent_readpages(struct ex
  						  index - first_index, start,
  						  end, get_extent, em_cached,
  						  bio, mirror_num, bio_flags,
 -						  rw);
-+						  rw, keep_page);
++						  rw, keep_page,
++						  keep_page ? pages : NULL,
++						  keep_page ? nr_pages : 0,
++						  wait, numreqs);
  			start = page_start;
  			end = start + PAGE_CACHE_SIZE - 1;
  			first_index = index;
-@@ -3038,7 +3076,7 @@ static void __extent_readpages(struct ex
+@@ -3038,7 +3113,10 @@ static void __extent_readpages(struct ex
  		__do_contiguous_readpages(tree, &pages[first_index],
  					  index - first_index, start,
  					  end, get_extent, em_cached, bio,
 -					  mirror_num, bio_flags, rw);
-+					  mirror_num, bio_flags, rw, keep_page);
++					  mirror_num, bio_flags, rw,
++					  keep_page, keep_page ? pages : NULL,
++					  keep_page ? nr_pages : 0,
++					  wait, numreqs);
  }
  
  static int __extent_read_full_page(struct extent_io_tree *tree,
-@@ -3064,7 +3102,7 @@ static int __extent_read_full_page(struc
+@@ -3064,7 +3142,7 @@ static int __extent_read_full_page(struc
  	}
  
  	ret = __do_readpage(tree, page, get_extent, NULL, bio, mirror_num,
 -			    bio_flags, rw);
-+			    bio_flags, rw, 0);
++			    bio_flags, rw, 0, NULL, 0, NULL, NULL);
  	return ret;
  }
  
-@@ -3090,7 +3128,7 @@ int extent_read_full_page_nolock(struct
+@@ -3090,7 +3168,7 @@ int extent_read_full_page_nolock(struct
  	int ret;
  
  	ret = __do_readpage(tree, page, get_extent, NULL, &bio, mirror_num,
 -				      &bio_flags, READ);
-+				      &bio_flags, READ, 0);
++			    &bio_flags, READ, 0, NULL, 0, NULL, NULL);
  	if (bio)
  		ret = submit_one_bio(READ, bio, mirror_num, bio_flags);
  	return ret;
-@@ -3120,7 +3158,8 @@ static noinline_for_stack int writepage_
+@@ -3120,7 +3198,8 @@ static noinline_for_stack int writepage_
  			      struct page *page, struct writeback_control *wbc,
  			      struct extent_page_data *epd,
  			      u64 delalloc_start,
@@ -326,7 +435,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  {
  	struct extent_io_tree *tree = epd->tree;
  	u64 page_end = delalloc_start + PAGE_CACHE_SIZE - 1;
-@@ -3138,7 +3177,9 @@ static noinline_for_stack int writepage_
+@@ -3138,7 +3217,9 @@ static noinline_for_stack int writepage_
  					       page,
  					       &delalloc_start,
  					       &delalloc_end,
@@ -337,7 +446,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  		if (nr_delalloc == 0) {
  			delalloc_start = delalloc_end + 1;
  			continue;
-@@ -3147,7 +3188,9 @@ static noinline_for_stack int writepage_
+@@ -3147,7 +3228,9 @@ static noinline_for_stack int writepage_
  					       delalloc_start,
  					       delalloc_end,
  					       &page_started,
@@ -348,7 +457,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  		/* File system has been set read-only */
  		if (ret) {
  			SetPageError(page);
-@@ -3211,7 +3254,8 @@ static noinline_for_stack int __extent_w
+@@ -3211,7 +3294,8 @@ static noinline_for_stack int __extent_w
  				 struct extent_page_data *epd,
  				 loff_t i_size,
  				 unsigned long nr_written,
@@ -358,7 +467,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  {
  	struct extent_io_tree *tree = epd->tree;
  	u64 start = page_offset(page);
-@@ -3243,7 +3287,8 @@ static noinline_for_stack int __extent_w
+@@ -3243,7 +3327,8 @@ static noinline_for_stack int __extent_w
  				redirty_page_for_writepage(wbc, page);
  
  			update_nr_written(page, wbc, nr_written);
@@ -368,7 +477,16 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  			ret = 1;
  			goto done_unlocked;
  		}
-@@ -3369,7 +3414,8 @@ done_unlocked:
+@@ -3344,7 +3429,7 @@ static noinline_for_stack int __extent_w
+ 						 sector, iosize, pg_offset,
+ 						 bdev, &epd->bio, max_nr,
+ 						 end_bio_extent_writepage,
+-						 0, 0, 0);
++						 0, 0, 0, NULL, 0, NULL, NULL);
+ 			if (ret)
+ 				SetPageError(page);
+ 		}
+@@ -3369,7 +3454,8 @@ done_unlocked:
   * and the end_io handler clears the writeback ranges
   */
  static int __extent_writepage(struct page *page, struct writeback_control *wbc,
@@ -378,7 +496,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  {
  	struct inode *inode = page->mapping->host;
  	struct extent_page_data *epd = data;
-@@ -3378,7 +3424,6 @@ static int __extent_writepage(struct pag
+@@ -3378,7 +3464,6 @@ static int __extent_writepage(struct pag
  	int ret;
  	int nr = 0;
  	size_t pg_offset = 0;
@@ -386,7 +504,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  	unsigned long end_index = i_size >> PAGE_CACHE_SHIFT;
  	int write_flags;
  	unsigned long nr_written = 0;
-@@ -3394,36 +3439,37 @@ static int __extent_writepage(struct pag
+@@ -3394,36 +3479,37 @@ static int __extent_writepage(struct pag
  
  	ClearPageError(page);
  
@@ -444,7 +562,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  	if (ret == 1)
  		goto done_unlocked;
  
-@@ -3437,7 +3483,8 @@ done:
+@@ -3437,7 +3523,8 @@ done:
  		ret = ret < 0 ? ret : -EIO;
  		end_extent_writepage(page, ret, start, page_end);
  	}
@@ -454,7 +572,17 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  	return ret;
  
  done_unlocked:
-@@ -3913,7 +3960,8 @@ int extent_write_full_page(struct extent
+@@ -3594,7 +3681,8 @@ static noinline_for_stack int write_one_
+ 		ret = submit_extent_page(rw, tree, p, offset >> 9,
+ 					 PAGE_CACHE_SIZE, 0, bdev, &epd->bio,
+ 					 -1, end_bio_extent_buffer_writepage,
+-					 0, epd->bio_flags, bio_flags);
++					 0, epd->bio_flags, bio_flags, NULL,
++					 0, NULL, NULL);
+ 		epd->bio_flags = bio_flags;
+ 		if (ret) {
+ 			set_bit(EXTENT_BUFFER_IOERR, &eb->bflags);
+@@ -3913,7 +4001,8 @@ int extent_write_full_page(struct extent
  		.bio_flags = 0,
  	};
  
@@ -464,7 +592,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -3947,7 +3995,8 @@ int extent_write_locked_range(struct ext
+@@ -3947,7 +4036,8 @@ int extent_write_locked_range(struct ext
  	while (start <= end) {
  		page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
  		if (clear_page_dirty_for_io(page))
@@ -474,7 +602,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  		else {
  			if (tree->ops && tree->ops->writepage_end_io_hook)
  				tree->ops->writepage_end_io_hook(page, start,
-@@ -3963,6 +4012,13 @@ int extent_write_locked_range(struct ext
+@@ -3963,6 +4053,13 @@ int extent_write_locked_range(struct ext
  	return ret;
  }
  
@@ -488,7 +616,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  int extent_writepages(struct extent_io_tree *tree,
  		      struct address_space *mapping,
  		      get_extent_t *get_extent,
-@@ -3979,7 +4035,7 @@ int extent_writepages(struct extent_io_t
+@@ -3979,7 +4076,7 @@ int extent_writepages(struct extent_io_t
  	};
  
  	ret = extent_write_cache_pages(tree, mapping, wbc,
@@ -497,42 +625,47 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/extent_io.c
  				       flush_write_bio);
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -4013,12 +4069,12 @@ int extent_readpages(struct extent_io_tr
+@@ -4013,12 +4110,12 @@ int extent_readpages(struct extent_io_tr
  		if (nr < ARRAY_SIZE(pagepool))
  			continue;
  		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
 -				   &bio, 0, &bio_flags, READ);
-+				   &bio, 0, &bio_flags, READ, 0);
++				   &bio, 0, &bio_flags, READ, 0, NULL, NULL);
  		nr = 0;
  	}
  	if (nr)
  		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
 -				   &bio, 0, &bio_flags, READ);
-+				   &bio, 0, &bio_flags, READ, 0);
++				   &bio, 0, &bio_flags, READ, 0, NULL, NULL);
  
  	if (em_cached)
  		free_extent_map(em_cached);
-@@ -5443,3 +5499,57 @@ int try_release_extent_buffer(struct pag
+@@ -5443,3 +5540,62 @@ int try_release_extent_buffer(struct pag
  
  	return release_extent_buffer(eb);
  }
 +
-+int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages)
++int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages,
++		    wait_queue_head_t *wait, atomic_t *numreqs)
 +{
 +	struct extent_map *em_cached = NULL;
 +	struct bio *bio = NULL;
 +	unsigned long bio_flags = 0;
++	int ret = 0;
 +
 +	__extent_readpages(&BTRFS_I(inode)->io_tree,
 +			   pages, nr_pages, btrfs_get_extent, &em_cached,
-+			   &bio, 0, &bio_flags, READ, 1);
++			   &bio, 0, &bio_flags, READ, 1, wait, numreqs);
 +
 +	if (em_cached)
 +		free_extent_map(em_cached);
 +
-+	if (bio)
-+		return submit_one_bio(READ, bio, 0, bio_flags);
-+	return 0;
++	if (bio) {
++		ret = submit_one_bio(READ, bio, 0, bio_flags);
++		if (ret == 0 && numreqs)
++			atomic_inc(numreqs);
++	}
++	return ret;
 +}
 +EXPORT_SYMBOL(btrfs_read_prep);
 +
@@ -1348,3 +1481,18 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/xattr.c
  
  ssize_t btrfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
  {
+Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/volumes.h
+===================================================================
+--- linux-3.10.0-229.el7.centos.x86_64_btrfs_patch.orig/fs/btrfs/volumes.h
++++ linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/volumes.h
+@@ -174,6 +174,10 @@ struct btrfs_io_bio {
+ 	u8 *csum_allocated;
+ 	btrfs_io_bio_end_io_t *end_io;
+ 	struct bio bio;
++	struct page **locked_pages;
++	int locked_page_num;
++	wait_queue_head_t *wait;
++	atomic_t *numreqs;
+ };
+ 
+ static inline struct btrfs_io_bio *btrfs_io_bio(struct bio *bio)

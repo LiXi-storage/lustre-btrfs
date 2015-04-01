@@ -299,13 +299,10 @@ static int osd_bufs_put(const struct lu_env *env, struct dt_object *dt,
 	for (i = 0; i < npages; i++) {
 		if (lnb[i].lnb_page == NULL)
 			continue;
-		//LASSERT(PageLocked(lnb[i].lnb_page));
+		LASSERT(PageLocked(lnb[i].lnb_page));
 		///* btrfs_writepage_start_hook() checks whether PageChecked() is cleared,
 		// * so need to calls ClearPageChecked() like btrfs_drop_pages() does */
-		//ClearPageChecked(lnb[i].lnb_page);
-		/* todo, this is a walkaround fix */
-		if (PageLocked(lnb[i].lnb_page))
-			unlock_page(lnb[i].lnb_page);
+		unlock_page(lnb[i].lnb_page);
 		page_cache_release(lnb[i].lnb_page);
 		lu_object_put(env, &dt->do_lu);
 		lnb[i].lnb_page = NULL;
@@ -320,6 +317,8 @@ static int __osd_init_iobuf(struct osd_device *d, struct osd_iobuf *iobuf,
 	int i;
 	LASSERT(pages <= PTLRPC_MAX_BRW_PAGES);
 
+	init_waitqueue_head(&iobuf->dr_wait);
+	atomic_set(&iobuf->dr_numreqs, 0);
 	iobuf->dr_npages = 0;
 
 	/* start with 1MB for 4K blocks */
@@ -388,7 +387,11 @@ static int osd_read_prep(const struct lu_env *env, struct dt_object *dt,
 	}
 
 	if (iobuf->dr_npages)
-		rc = lbtrfs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
+		rc = lbtrfs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages,
+				      &iobuf->dr_wait, &iobuf->dr_numreqs);
+
+	wait_event(iobuf->dr_wait,
+		   atomic_read(&iobuf->dr_numreqs) == 0);
 
 	RETURN(rc);
 }
@@ -466,7 +469,8 @@ static int osd_write_prep(const struct lu_env *env, struct dt_object *dt,
 	}
 #endif
 
-	rc = lbtrfs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages);
+	rc = lbtrfs_read_prep(inode, iobuf->dr_pages, iobuf->dr_npages,
+			      &iobuf->dr_wait, &iobuf->dr_numreqs);
 	if (rc)  {
 		CDEBUG(D_INODE, "failed to read inode, rc = %d\n",  rc);
 #ifdef LIXI_RESERVE
