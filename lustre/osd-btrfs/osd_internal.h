@@ -153,10 +153,13 @@ struct osd_it_index {
 };
 
 struct osd_iobuf {
-	int		  dr_max_pages;
-	int		  dr_npages;
-	struct page	**dr_pages;
-	struct lu_buf	  dr_pg_buf;
+	wait_queue_head_t	  dr_wait;
+	/* number of reqs being processed, currently only read */
+	atomic_t		  dr_numreqs;
+	int			  dr_max_pages;
+	int			  dr_npages;
+	struct page		**dr_pages;
+	struct lu_buf		  dr_pg_buf;
 };
 
 struct osd_thread_info {
