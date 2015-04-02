@@ -129,6 +129,7 @@ static void osd_object_delete(const struct lu_env *env, struct lu_object *l)
 {
 	struct osd_object *obj   = osd_obj(l);
 	struct inode      *inode = obj->oo_inode;
+	ENTRY;
 
 	LINVRNT(osd_invariant(obj));
 
@@ -163,6 +164,7 @@ static void osd_object_delete(const struct lu_env *env, struct lu_object *l)
 		}
 #endif /* LIXI */
 	}
+	EXIT;
 }
 
 /*
@@ -614,70 +616,71 @@ static int osd_declare_object_destroy(const struct lu_env *env,
  * life-cycle (for all existing callers, that is. New callers have to provide
  * their own locking.)
  */
-static int osd_inode_unlinked(const struct inode *inode)
-{
-        return inode->i_nlink == 0;
-}
-
 static int osd_object_destroy(const struct lu_env *env,
                               struct dt_object *dt,
                               struct thandle *th)
 {
-        const struct lu_fid    *fid = lu_object_fid(&dt->do_lu);
-        struct osd_object      *obj = osd_dt_obj(dt);
-        struct inode           *inode = obj->oo_inode;
-        struct osd_device      *osd = osd_obj2dev(obj);
-        struct osd_thandle     *oh;
-        int                     result;
-        ENTRY;
+	struct osd_thread_info	*info = osd_oti_get(env);
+	const struct lu_fid	*fid = lu_object_fid(&dt->do_lu);
+	struct osd_object	*obj = osd_dt_obj(dt);
+	struct inode		*inode = obj->oo_inode;
+	struct osd_device	*osd = osd_obj2dev(obj);
+	struct osd_thandle	*oh;
+	int			 rc;
+	struct dentry		*dparent;
+	ENTRY;
 
-        oh = container_of0(th, struct osd_thandle, ot_super);
-        LASSERT(oh->ot_handle);
-        LASSERT(inode);
-        LASSERT(!lu_object_is_dying(dt->do_lu.lo_header));
+	oh = container_of0(th, struct osd_thandle, ot_super);
+	LASSERT(oh->ot_handle);
+	LASSERT(inode);
+	LASSERT(!lu_object_is_dying(dt->do_lu.lo_header));
 
 	if (unlikely(fid_is_acct(fid)))
 		RETURN(-EPERM);
 
-	if (S_ISDIR(inode->i_mode)) {
-		LASSERT(osd_inode_unlinked(inode) || inode->i_nlink == 1 ||
-			inode->i_nlink == 2);
-#ifdef LIXI
-		/* it will check/delete the inode from remote parent,
-		 * how to optimize it? unlink performance impaction XXX */
-		result = osd_delete_from_remote_parent(env, osd, obj, oh);
-		if (result != 0 && result != -ENOENT) {
-			CERROR("%s: delete inode "DFID": rc = %d\n",
-			       osd_name(osd), PFID(fid), result);
-		}
-#endif /* LIXI */
-		spin_lock(&obj->oo_guard);
-		clear_nlink(inode);
-		spin_unlock(&obj->oo_guard);
-		/**
+	if (fid_is_last_id(fid))
+		RETURN(0);
+
+	/* TODO: remote directory */
+
+	if (fid_is_on_ost(env, osd, fid) || fid_is_llog(fid) ||
+	    fid_seq(fid) == FID_SEQ_LOCAL_FILE) {
+		rc = osd_get_idx_and_name(info, osd, fid, &dparent,
+					  (char *)info->oti_str,
+					  sizeof(info->oti_str));
+		if (rc)
+			RETURN(rc);
+		LASSERT(dparent);
+
+		rc = __lbtrfs_unlink_inode(oh->ot_handle,
+					   LBTRFS_I(inode)->root,
+					   dparent->d_inode, inode,
+					   info->oti_str,
+					   strlen(info->oti_str));
+		if (rc)
+			RETURN(rc);
+		/*
 		 * No s_op->dirty_inode() is defined,
 		 * so can't use ll_dirty_inode()
 		 */
-		lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(inode)->root, inode);
+		lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(inode)->root,
+				    inode);
+		if (inode->i_nlink == 0) {
+			rc = lbtrfs_orphan_add(oh->ot_handle, inode);
+			if (rc)
+				RETURN(rc);
+		}
 	}
 
-#ifdef LIXI
-	osd_trans_exec_op(env, th, OSD_OT_DESTROY);
-#endif /* LIXI */
+	rc = lbtrfs_oi_delete_with_fid(oh->ot_handle,
+				       osd->od_mnt->mnt_sb,
+				       (struct lbtrfs_lu_fid *)fid);
 
-	result = lbtrfs_oi_delete_with_fid(oh->ot_handle,
-					    osd->od_mnt->mnt_sb,
-					    (struct lbtrfs_lu_fid *)fid);
-
-#ifdef LIXI
-        /* XXX: add to ext3 orphan list */
-        /* rc = ext3_orphan_add(handle_t *handle, struct inode *inode) */
-
-        /* not needed in the cache anymore */
-        set_bit(LU_OBJECT_HEARD_BANSHEE, &dt->do_lu.lo_header->loh_flags);
-#endif /* LIXI */
-
-        RETURN(0);
+	if (rc)
+		RETURN(rc);
+	/* not needed in the cache anymore */
+	set_bit(LU_OBJECT_HEARD_BANSHEE, &dt->do_lu.lo_header->loh_flags);
+	RETURN(0);
 }
 
 static void osd_inode_getattr(const struct lu_env *env,

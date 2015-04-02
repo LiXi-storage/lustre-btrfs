@@ -176,10 +176,10 @@ static struct lu_kmem_descr osd_caches[] = {
 static int osd_sync(const struct lu_env *env, struct dt_device *d)
 {
 	int rc;
+	struct super_block *sb = osd_sb(osd_dt_dev(d));
 
 	CDEBUG(D_CACHE, "syncing OSD %s\n", LUSTRE_OSD_BTRFS_NAME);
-	/* LIXI TODO: add actual sync function: btrfs_sync_fs */
-	rc = 0;
+	rc = sb->s_op->sync_fs(sb, 1);
 	CDEBUG(D_CACHE, "synced OSD %s: rc = %d\n",
 	       LUSTRE_OSD_BTRFS_NAME, rc);
 

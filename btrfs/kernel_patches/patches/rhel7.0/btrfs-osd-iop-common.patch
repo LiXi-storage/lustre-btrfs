@@ -1009,7 +1009,15 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/inode.c
  	}
  	return ret;
  }
-@@ -3639,6 +3676,8 @@ noinline int btrfs_update_inode(struct b
+@@ -3062,6 +3099,7 @@ int btrfs_orphan_add(struct btrfs_trans_
+ 	}
+ 	return 0;
+ }
++EXPORT_SYMBOL(btrfs_orphan_add);
+ 
+ /*
+  * We have done the truncate/delete so we can go ahead and remove the orphan
+@@ -3639,6 +3677,8 @@ noinline int btrfs_update_inode(struct b
  
  	return btrfs_update_inode_item(trans, root, inode);
  }
@@ -1018,15 +1026,30 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/inode.c
  
  noinline int btrfs_update_inode_fallback(struct btrfs_trans_handle *trans,
  					 struct btrfs_root *root,
-@@ -3769,6 +3808,7 @@ int btrfs_unlink_inode(struct btrfs_tran
- 	}
+@@ -3657,10 +3697,10 @@ noinline int btrfs_update_inode_fallback
+  * recovery code.  It remove a link in a directory with a given name, and
+  * also drops the back refs in the inode to the directory
+  */
+-static int __btrfs_unlink_inode(struct btrfs_trans_handle *trans,
+-				struct btrfs_root *root,
+-				struct inode *dir, struct inode *inode,
+-				const char *name, int name_len)
++int __btrfs_unlink_inode(struct btrfs_trans_handle *trans,
++			 struct btrfs_root *root,
++			 struct inode *dir, struct inode *inode,
++			 const char *name, int name_len)
+ {
+ 	struct btrfs_path *path;
+ 	int ret = 0;
+@@ -3755,6 +3795,7 @@ err:
+ out:
  	return ret;
  }
-+EXPORT_SYMBOL(btrfs_unlink_inode);
++EXPORT_SYMBOL(__btrfs_unlink_inode);
  
- /*
-  * helper to start transaction for unlink and rmdir.
-@@ -5161,6 +5201,7 @@ struct inode *btrfs_lookup_dentry(struct
+ int btrfs_unlink_inode(struct btrfs_trans_handle *trans,
+ 		       struct btrfs_root *root,
+@@ -5161,6 +5202,7 @@ struct inode *btrfs_lookup_dentry(struct
  
  	return inode;
  }
@@ -1034,7 +1057,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/inode.c
  
  static int btrfs_dentry_delete(const struct dentry *dentry)
  {
-@@ -5583,6 +5624,7 @@ struct inode *btrfs_new_inode(struct btr
+@@ -5583,6 +5625,7 @@ struct inode *btrfs_new_inode(struct btr
  	struct btrfs_inode_ref *ref;
  	struct btrfs_key key[2];
  	u32 sizes[2];
@@ -1042,7 +1065,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/inode.c
  	unsigned long ptr;
  	int ret;
  
-@@ -5602,7 +5644,7 @@ struct inode *btrfs_new_inode(struct btr
+@@ -5602,7 +5645,7 @@ struct inode *btrfs_new_inode(struct btr
  	 */
  	inode->i_ino = objectid;
  
@@ -1051,7 +1074,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/inode.c
  		trace_btrfs_inode_request(dir);
  
  		ret = btrfs_set_inode_index(dir, index);
-@@ -5611,6 +5653,8 @@ struct inode *btrfs_new_inode(struct btr
+@@ -5611,6 +5654,8 @@ struct inode *btrfs_new_inode(struct btr
  			iput(inode);
  			return ERR_PTR(ret);
  		}
@@ -1060,7 +1083,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/inode.c
  	}
  	/*
  	 * index_cnt is ignored for everything but a dir,
-@@ -5635,21 +5679,24 @@ struct inode *btrfs_new_inode(struct btr
+@@ -5635,21 +5680,24 @@ struct inode *btrfs_new_inode(struct btr
  	btrfs_set_key_type(&key[0], BTRFS_INODE_ITEM_KEY);
  	key[0].offset = 0;
  
@@ -1097,7 +1120,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/inode.c
  	if (ret != 0)
  		goto fail;
  
-@@ -5662,12 +5709,14 @@ struct inode *btrfs_new_inode(struct btr
+@@ -5662,12 +5710,14 @@ struct inode *btrfs_new_inode(struct btr
  			     sizeof(*inode_item));
  	fill_inode_item(trans, path->nodes[0], inode_item, inode);
  
@@ -1118,7 +1141,7 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/inode.c
  
  	btrfs_mark_buffer_dirty(path->nodes[0]);
  	btrfs_free_path(path);
-@@ -8959,6 +9008,350 @@ static int btrfs_permission(struct inode
+@@ -8959,6 +9009,350 @@ static int btrfs_permission(struct inode
  	return generic_permission(inode, mask);
  }
  
@@ -1496,3 +1519,18 @@ Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/volumes.h
  };
  
  static inline struct btrfs_io_bio *btrfs_io_bio(struct bio *bio)
+Index: linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/ctree.h
+===================================================================
+--- linux-3.10.0-229.el7.centos.x86_64_btrfs_patch.orig/fs/btrfs/ctree.h
++++ linux-3.10.0-229.el7.centos.x86_64_btrfs_patch/fs/btrfs/ctree.h
+@@ -3802,6 +3802,10 @@ static inline void btrfs_force_ra(struct
+ 
+ struct inode *btrfs_lookup_dentry(struct inode *dir, struct dentry *dentry);
+ int btrfs_set_inode_index(struct inode *dir, u64 *index);
++int __btrfs_unlink_inode(struct btrfs_trans_handle *trans,
++			 struct btrfs_root *root,
++			 struct inode *dir, struct inode *inode,
++			 const char *name, int name_len);
+ int btrfs_unlink_inode(struct btrfs_trans_handle *trans,
+ 		       struct btrfs_root *root,
+ 		       struct inode *dir, struct inode *inode,

@@ -238,6 +238,24 @@ struct page *osd_get_page(struct dt_object *dt, loff_t offset, int rw)
 	return page;
 }
 
+static int osd_bufs_put(const struct lu_env *env, struct dt_object *dt,
+			struct niobuf_local *lnb, int npages)
+{
+	int i;
+
+	for (i = 0; i < npages; i++) {
+		if (lnb[i].lnb_page == NULL)
+			continue;
+		LASSERT(PageLocked(lnb[i].lnb_page));
+		unlock_page(lnb[i].lnb_page);
+		page_cache_release(lnb[i].lnb_page);
+		lu_object_put(env, &dt->do_lu);
+		lnb[i].lnb_page = NULL;
+	}
+
+	RETURN(0);
+}
+
 /*
  * there are following "locks":
  * journal_start
@@ -256,19 +274,19 @@ struct page *osd_get_page(struct dt_object *dt, loff_t offset, int rw)
     * i_data_sem
 
 */
-int osd_bufs_get(const struct lu_env *env, struct dt_object *d, loff_t pos,
+int osd_bufs_get(const struct lu_env *env, struct dt_object *dt, loff_t pos,
                  ssize_t len, struct niobuf_local *lnb, int rw,
                  struct lustre_capa *capa)
 {
-        struct osd_object   *obj    = osd_dt_obj(d);
-        int npages, i, rc = 0;
+	struct osd_object   *obj    = osd_dt_obj(dt);
+	int npages, i, rc = 0;
 
-        LASSERT(obj->oo_inode);
+	LASSERT(obj->oo_inode);
 
-        osd_map_remote_to_local(pos, len, &npages, lnb);
+	osd_map_remote_to_local(pos, len, &npages, lnb);
 
-        for (i = 0; i < npages; i++, lnb++) {
-		lnb->lnb_page = osd_get_page(d, lnb->lnb_file_offset, rw);
+	for (i = 0; i < npages; i++, lnb++) {
+		lnb->lnb_page = osd_get_page(dt, lnb->lnb_file_offset, rw);
 		if (lnb->lnb_page == NULL)
 			GOTO(cleanup, rc = -ENOMEM);
 
@@ -283,32 +301,14 @@ int osd_bufs_get(const struct lu_env *env, struct dt_object *d, loff_t pos,
 		wait_on_page_writeback(lnb->lnb_page);
 		BUG_ON(PageWriteback(lnb->lnb_page));
 
-                lu_object_get(&d->do_lu);
-        }
-        rc = i;
+		lu_object_get(&dt->do_lu);
+	}
+	RETURN(i);
 
 cleanup:
-        RETURN(rc);
-}
-
-static int osd_bufs_put(const struct lu_env *env, struct dt_object *dt,
-			struct niobuf_local *lnb, int npages)
-{
-	int i;
-
-	for (i = 0; i < npages; i++) {
-		if (lnb[i].lnb_page == NULL)
-			continue;
-		LASSERT(PageLocked(lnb[i].lnb_page));
-		///* btrfs_writepage_start_hook() checks whether PageChecked() is cleared,
-		// * so need to calls ClearPageChecked() like btrfs_drop_pages() does */
-		unlock_page(lnb[i].lnb_page);
-		page_cache_release(lnb[i].lnb_page);
-		lu_object_put(env, &dt->do_lu);
-		lnb[i].lnb_page = NULL;
-	}
-
-	RETURN(0);
+	if (i > 0)
+		osd_bufs_put(env, dt, lnb - i, i);
+	RETURN(rc);
 }
 
 static int __osd_init_iobuf(struct osd_device *d, struct osd_iobuf *iobuf,
