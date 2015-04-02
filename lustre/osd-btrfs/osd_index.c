@@ -418,8 +418,18 @@ static int osd_dir_delete(const struct lu_env *env, struct dt_object *dt,
 	else if (child_inode == NULL)
 		RETURN(-ENOENT);
 
-	rc = lbtrfs_unlink_inode(oh->ot_handle, LBTRFS_I(obj_inode)->root,
-				 obj_inode, child_inode, name, strlen(name));
+	rc = __lbtrfs_unlink_inode(oh->ot_handle, LBTRFS_I(obj_inode)->root,
+				   obj_inode, child_inode, name, strlen(name));
+	if (rc)
+		RETURN(rc);
+	/* No s_op->dirty_inode() is defined, so can't use ll_dirty_inode() */
+	lbtrfs_update_inode(oh->ot_handle, LBTRFS_I(child_inode)->root,
+			    child_inode);
+	if (child_inode->i_nlink == 0) {
+		rc = lbtrfs_orphan_add(oh->ot_handle, child_inode);
+		if (rc)
+			RETURN(rc);
+	}
 	iput(child_inode);
 
 	RETURN(rc);

@@ -1,18 +1,19 @@
-From 187b3a4ce2964dd3a44e2826926d2bacf2e40d3e Mon Sep 17 00:00:00 2001
+From 465d7f5ce28db2bfa4e9c617268b7741ede7113d Mon Sep 17 00:00:00 2001
 From: Wang Shilong <wangshilong1991@gmail.com>
 Date: Mon, 16 Mar 2015 10:56:45 -0400
 Subject: [PATCH] btrfs osd iop common
 
 ---
  fs/btrfs/btrfs_inode.h |  20 +++
+ fs/btrfs/ctree.h       |   4 +
  fs/btrfs/extent-tree.c |   4 +
  fs/btrfs/extent_io.c   | 301 +++++++++++++++++++++++--------
  fs/btrfs/extent_io.h   |   8 +-
  fs/btrfs/file.c        |   1 +
- fs/btrfs/inode.c       | 469 ++++++++++++++++++++++++++++++++++++++++++++-----
+ fs/btrfs/inode.c       | 479 +++++++++++++++++++++++++++++++++++++++++++------
  fs/btrfs/volumes.h     |   4 +
  fs/btrfs/xattr.c       |   1 +
- 8 files changed, 687 insertions(+), 121 deletions(-)
+ 9 files changed, 697 insertions(+), 125 deletions(-)
 
 diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
 index ffe3c14..f6b03cf 100644
@@ -43,6 +44,21 @@ index ffe3c14..f6b03cf 100644
 +		     struct inode *inode, const char *name,
 +		     const void *value, size_t size, int flags);
  #endif
+diff --git a/fs/btrfs/ctree.h b/fs/btrfs/ctree.h
+index d7b2795..3c0a006 100644
+--- a/fs/btrfs/ctree.h
++++ b/fs/btrfs/ctree.h
+@@ -3860,6 +3860,10 @@ static inline void btrfs_force_ra(struct address_space *mapping,
+ 
+ struct inode *btrfs_lookup_dentry(struct inode *dir, struct dentry *dentry);
+ int btrfs_set_inode_index(struct inode *dir, u64 *index);
++int __btrfs_unlink_inode(struct btrfs_trans_handle *trans,
++			 struct btrfs_root *root,
++			 struct inode *dir, struct inode *inode,
++			 const char *name, int name_len);
+ int btrfs_unlink_inode(struct btrfs_trans_handle *trans,
+ 		       struct btrfs_root *root,
+ 		       struct inode *dir, struct inode *inode,
 diff --git a/fs/btrfs/extent-tree.c b/fs/btrfs/extent-tree.c
 index a684086..c9f466c 100644
 --- a/fs/btrfs/extent-tree.c
@@ -750,7 +766,7 @@ index aaca894..427750f 100644
  /*
   * this drops all the extents in the cache that intersect the range
 diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
-index e3aedbf..85a55c9 100644
+index e3aedbf..1cd379f 100644
 --- a/fs/btrfs/inode.c
 +++ b/fs/btrfs/inode.c
 @@ -89,15 +89,15 @@ static int btrfs_finish_ordered_io(struct btrfs_ordered_extent *ordered_extent);
@@ -1028,7 +1044,15 @@ index e3aedbf..85a55c9 100644
  	}
  	return ret;
  }
-@@ -3741,6 +3779,8 @@ noinline int btrfs_update_inode(struct btrfs_trans_handle *trans,
+@@ -3163,6 +3201,7 @@ int btrfs_orphan_add(struct btrfs_trans_handle *trans, struct inode *inode)
+ 	}
+ 	return 0;
+ }
++EXPORT_SYMBOL(btrfs_orphan_add);
+ 
+ /*
+  * We have done the truncate/delete so we can go ahead and remove the orphan
+@@ -3741,6 +3780,8 @@ noinline int btrfs_update_inode(struct btrfs_trans_handle *trans,
  
  	return btrfs_update_inode_item(trans, root, inode);
  }
@@ -1037,7 +1061,30 @@ index e3aedbf..85a55c9 100644
  
  noinline int btrfs_update_inode_fallback(struct btrfs_trans_handle *trans,
  					 struct btrfs_root *root,
-@@ -3871,6 +3911,7 @@ int btrfs_unlink_inode(struct btrfs_trans_handle *trans,
+@@ -3759,10 +3800,10 @@ noinline int btrfs_update_inode_fallback(struct btrfs_trans_handle *trans,
+  * recovery code.  It remove a link in a directory with a given name, and
+  * also drops the back refs in the inode to the directory
+  */
+-static int __btrfs_unlink_inode(struct btrfs_trans_handle *trans,
+-				struct btrfs_root *root,
+-				struct inode *dir, struct inode *inode,
+-				const char *name, int name_len)
++int __btrfs_unlink_inode(struct btrfs_trans_handle *trans,
++	  		 struct btrfs_root *root,
++			 struct inode *dir, struct inode *inode,
++			 const char *name, int name_len)
+ {
+ 	struct btrfs_path *path;
+ 	int ret = 0;
+@@ -3857,6 +3898,7 @@ err:
+ out:
+ 	return ret;
+ }
++EXPORT_SYMBOL(__btrfs_unlink_inode);
+ 
+ int btrfs_unlink_inode(struct btrfs_trans_handle *trans,
+ 		       struct btrfs_root *root,
+@@ -3871,6 +3913,7 @@ int btrfs_unlink_inode(struct btrfs_trans_handle *trans,
  	}
  	return ret;
  }
@@ -1045,7 +1092,7 @@ index e3aedbf..85a55c9 100644
  
  /*
   * helper to start transaction for unlink and rmdir.
-@@ -5305,6 +5346,7 @@ struct inode *btrfs_lookup_dentry(struct inode *dir, struct dentry *dentry)
+@@ -5305,6 +5348,7 @@ struct inode *btrfs_lookup_dentry(struct inode *dir, struct dentry *dentry)
  
  	return inode;
  }
@@ -1053,7 +1100,7 @@ index e3aedbf..85a55c9 100644
  
  static int btrfs_dentry_delete(const struct dentry *dentry)
  {
-@@ -5580,7 +5622,7 @@ int btrfs_write_inode(struct inode *inode, struct writeback_control *wbc)
+@@ -5580,7 +5624,7 @@ int btrfs_write_inode(struct inode *inode, struct writeback_control *wbc)
   * FIXME, needs more benchmarking...there are no reasons other than performance
   * to keep or drop this code.
   */
@@ -1062,7 +1109,7 @@ index e3aedbf..85a55c9 100644
  {
  	struct btrfs_root *root = BTRFS_I(inode)->root;
  	struct btrfs_trans_handle *trans;
-@@ -5609,6 +5651,7 @@ static int btrfs_dirty_inode(struct inode *inode)
+@@ -5609,6 +5653,7 @@ static int btrfs_dirty_inode(struct inode *inode)
  
  	return ret;
  }
@@ -1070,7 +1117,7 @@ index e3aedbf..85a55c9 100644
  
  /*
   * This is a copy of file_update_time.  We need this so we can return error on
-@@ -5738,6 +5781,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+@@ -5738,6 +5783,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
  	struct btrfs_inode_ref *ref;
  	struct btrfs_key key[2];
  	u32 sizes[2];
@@ -1078,7 +1125,7 @@ index e3aedbf..85a55c9 100644
  	unsigned long ptr;
  	int ret;
  
-@@ -5757,7 +5801,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+@@ -5757,7 +5803,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
  	 */
  	inode->i_ino = objectid;
  
@@ -1087,7 +1134,7 @@ index e3aedbf..85a55c9 100644
  		trace_btrfs_inode_request(dir);
  
  		ret = btrfs_set_inode_index(dir, index);
-@@ -5766,6 +5810,8 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+@@ -5766,6 +5812,8 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
  			iput(inode);
  			return ERR_PTR(ret);
  		}
@@ -1096,7 +1143,7 @@ index e3aedbf..85a55c9 100644
  	}
  	/*
  	 * index_cnt is ignored for everything but a dir,
-@@ -5790,18 +5836,21 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+@@ -5790,18 +5838,21 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
  	key[0].type = BTRFS_INODE_ITEM_KEY;
  	key[0].offset = 0;
  
@@ -1129,7 +1176,7 @@ index e3aedbf..85a55c9 100644
  
  	location = &BTRFS_I(inode)->location;
  	location->objectid = objectid;
-@@ -5813,7 +5862,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+@@ -5813,7 +5864,7 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
  		goto fail;
  
  	path->leave_spinning = 1;
@@ -1138,7 +1185,7 @@ index e3aedbf..85a55c9 100644
  	if (ret != 0)
  		goto fail_unlock;
  
-@@ -5826,12 +5875,14 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
+@@ -5826,12 +5877,14 @@ struct inode *btrfs_new_inode(struct btrfs_trans_handle *trans,
  			     sizeof(*inode_item));
  	fill_inode_item(trans, path->nodes[0], inode_item, inode);
  
@@ -1159,7 +1206,7 @@ index e3aedbf..85a55c9 100644
  
  	btrfs_mark_buffer_dirty(path->nodes[0]);
  	btrfs_free_path(path);
-@@ -9416,6 +9467,328 @@ static int btrfs_permission(struct inode *inode, int mask)
+@@ -9416,6 +9469,328 @@ static int btrfs_permission(struct inode *inode, int mask)
  	return generic_permission(inode, mask);
  }
  
