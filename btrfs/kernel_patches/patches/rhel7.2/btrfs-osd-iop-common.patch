@@ -1,4 +1,4 @@
-From 465d7f5ce28db2bfa4e9c617268b7741ede7113d Mon Sep 17 00:00:00 2001
+From b2af5eeea403b8ffe10e63816ef68038c69e12bc Mon Sep 17 00:00:00 2001
 From: Wang Shilong <wangshilong1991@gmail.com>
 Date: Mon, 16 Mar 2015 10:56:45 -0400
 Subject: [PATCH] btrfs osd iop common
@@ -7,13 +7,13 @@ Subject: [PATCH] btrfs osd iop common
  fs/btrfs/btrfs_inode.h |  20 +++
  fs/btrfs/ctree.h       |   4 +
  fs/btrfs/extent-tree.c |   4 +
- fs/btrfs/extent_io.c   | 301 +++++++++++++++++++++++--------
+ fs/btrfs/extent_io.c   | 317 ++++++++++++++++++++++++--------
  fs/btrfs/extent_io.h   |   8 +-
  fs/btrfs/file.c        |   1 +
  fs/btrfs/inode.c       | 479 +++++++++++++++++++++++++++++++++++++++++++------
  fs/btrfs/volumes.h     |   4 +
  fs/btrfs/xattr.c       |   1 +
- 9 files changed, 697 insertions(+), 125 deletions(-)
+ 9 files changed, 712 insertions(+), 126 deletions(-)
 
 diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
 index ffe3c14..f6b03cf 100644
@@ -96,7 +96,7 @@ index a684086..c9f466c 100644
  static int update_block_group(struct btrfs_root *root,
  			      u64 bytenr, u64 num_bytes, int alloc)
 diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
-index 6afb46a..4dd25de 100644
+index 6afb46a..55c805e 100644
 --- a/fs/btrfs/extent_io.c
 +++ b/fs/btrfs/extent_io.c
 @@ -1574,9 +1574,24 @@ out:
@@ -247,7 +247,26 @@ index 6afb46a..4dd25de 100644
  			page_cache_release(pages[i]);
  		}
  		nr_pages -= ret;
-@@ -2653,7 +2686,11 @@ readpage_ok:
+@@ -2533,6 +2566,18 @@ endio_readpage_release_extent(struct extent_io_tree *tree, u64 start, u64 len,
+ 	unlock_extent_cached(tree, start, end, &cached, GFP_ATOMIC);
+ }
+ 
++static void lustre_start_bio(atomic_t *numreqs)
++{
++	if (numreqs)
++		atomic_inc(numreqs);
++}
++
++static void lustre_end_bio(wait_queue_head_t *wait, atomic_t *numreqs)
++{
++	if (numreqs && atomic_dec_and_test(numreqs))
++		wake_up(wait);
++}
++
+ /*
+  * after a readpage IO is done, we need to:
+  * clear the uptodate bits on error
+@@ -2653,7 +2698,11 @@ readpage_ok:
  			ClearPageUptodate(page);
  			SetPageError(page);
  		}
@@ -260,17 +279,16 @@ index 6afb46a..4dd25de 100644
  		offset += len;
  
  		if (unlikely(!uptodate)) {
-@@ -2682,6 +2719,9 @@ readpage_ok:
+@@ -2682,6 +2731,8 @@ readpage_ok:
  	if (extent_len)
  		endio_readpage_release_extent(tree, extent_start, extent_len,
  					      uptodate);
-+	if (io_bio->numreqs && atomic_dec_and_test(io_bio->numreqs))
-+		wake_up(io_bio->wait);
++	lustre_end_bio(io_bio->wait, io_bio->numreqs);
 +
  	if (io_bio->end_io)
  		io_bio->end_io(io_bio, err);
  	bio_put(bio);
-@@ -2715,6 +2755,10 @@ btrfs_bio_alloc(struct block_device *bdev, u64 first_sector, int nr_vecs,
+@@ -2715,6 +2766,10 @@ btrfs_bio_alloc(struct block_device *bdev, u64 first_sector, int nr_vecs,
  		btrfs_bio->csum = NULL;
  		btrfs_bio->csum_allocated = NULL;
  		btrfs_bio->end_io = NULL;
@@ -281,7 +299,7 @@ index 6afb46a..4dd25de 100644
  	}
  	return bio;
  }
-@@ -2800,7 +2844,11 @@ static int submit_extent_page(int rw, struct extent_io_tree *tree,
+@@ -2800,7 +2855,11 @@ static int submit_extent_page(int rw, struct extent_io_tree *tree,
  			      bio_end_io_t end_io_func,
  			      int mirror_num,
  			      unsigned long prev_bio_flags,
@@ -294,7 +312,7 @@ index 6afb46a..4dd25de 100644
  {
  	int ret = 0;
  	struct bio *bio;
-@@ -2809,6 +2857,7 @@ static int submit_extent_page(int rw, struct extent_io_tree *tree,
+@@ -2809,6 +2868,7 @@ static int submit_extent_page(int rw, struct extent_io_tree *tree,
  	int this_compressed = bio_flags & EXTENT_BIO_COMPRESSED;
  	int old_compressed = prev_bio_flags & EXTENT_BIO_COMPRESSED;
  	size_t page_size = min_t(size_t, size, PAGE_CACHE_SIZE);
@@ -302,16 +320,22 @@ index 6afb46a..4dd25de 100644
  
  	if (bio_ret && *bio_ret) {
  		bio = *bio_ret;
-@@ -2824,6 +2873,8 @@ static int submit_extent_page(int rw, struct extent_io_tree *tree,
+@@ -2820,10 +2880,13 @@ static int submit_extent_page(int rw, struct extent_io_tree *tree,
+ 		if (prev_bio_flags != bio_flags || !contig ||
+ 		    merge_bio(rw, tree, page, offset, page_size, bio, bio_flags) ||
+ 		    bio_add_page(bio, page, page_size, offset) < page_size) {
++			lustre_start_bio(numreqs);
+ 			ret = submit_one_bio(rw, bio, mirror_num,
  					     prev_bio_flags);
- 			if (ret < 0)
+-			if (ret < 0)
++			if (ret < 0) {
++				lustre_end_bio(wait, numreqs);
  				return ret;
-+			if (numreqs)
-+				atomic_inc(numreqs);
++			}
  			bio = NULL;
  		} else {
  			return 0;
-@@ -2841,12 +2892,19 @@ static int submit_extent_page(int rw, struct extent_io_tree *tree,
+@@ -2841,12 +2904,20 @@ static int submit_extent_page(int rw, struct extent_io_tree *tree,
  	bio_add_page(bio, page, page_size, offset);
  	bio->bi_end_io = end_io_func;
  	bio->bi_private = tree;
@@ -326,15 +350,16 @@ index 6afb46a..4dd25de 100644
  		*bio_ret = bio;
 -	else
 +	} else {
++		lustre_start_bio(numreqs);
  		ret = submit_one_bio(rw, bio, mirror_num, bio_flags);
 -
-+		if (ret == 0 && numreqs)
-+			atomic_inc(numreqs);
++		if (ret < 0)
++			lustre_end_bio(wait, numreqs);
 +	}
  	return ret;
  }
  
-@@ -2909,7 +2967,10 @@ static int __do_readpage(struct extent_io_tree *tree,
+@@ -2909,7 +2980,10 @@ static int __do_readpage(struct extent_io_tree *tree,
  			 get_extent_t *get_extent,
  			 struct extent_map **em_cached,
  			 struct bio **bio, int mirror_num,
@@ -346,7 +371,7 @@ index 6afb46a..4dd25de 100644
  {
  	struct inode *inode = page->mapping->host;
  	u64 start = page_offset(page);
-@@ -3056,7 +3117,9 @@ static int __do_readpage(struct extent_io_tree *tree,
+@@ -3056,7 +3130,9 @@ static int __do_readpage(struct extent_io_tree *tree,
  					 bdev, bio, pnr,
  					 end_bio_extent_readpage, mirror_num,
  					 *bio_flags,
@@ -357,7 +382,7 @@ index 6afb46a..4dd25de 100644
  		if (!ret) {
  			nr++;
  			*bio_flags = this_bio_flag;
-@@ -3072,7 +3135,8 @@ out:
+@@ -3072,7 +3148,8 @@ out:
  	if (!nr) {
  		if (!PageError(page))
  			SetPageUptodate(page);
@@ -367,7 +392,7 @@ index 6afb46a..4dd25de 100644
  	}
  	return 0;
  }
-@@ -3083,7 +3147,12 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
+@@ -3083,7 +3160,12 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
  					     get_extent_t *get_extent,
  					     struct extent_map **em_cached,
  					     struct bio **bio, int mirror_num,
@@ -381,7 +406,7 @@ index 6afb46a..4dd25de 100644
  {
  	struct inode *inode;
  	struct btrfs_ordered_extent *ordered;
-@@ -3103,8 +3172,11 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
+@@ -3103,8 +3185,11 @@ static inline void __do_contiguous_readpages(struct extent_io_tree *tree,
  
  	for (index = 0; index < nr_pages; index++) {
  		__do_readpage(tree, pages[index], get_extent, em_cached, bio,
@@ -395,7 +420,7 @@ index 6afb46a..4dd25de 100644
  	}
  }
  
-@@ -3113,7 +3185,9 @@ static void __extent_readpages(struct extent_io_tree *tree,
+@@ -3113,7 +3198,9 @@ static void __extent_readpages(struct extent_io_tree *tree,
  			       int nr_pages, get_extent_t *get_extent,
  			       struct extent_map **em_cached,
  			       struct bio **bio, int mirror_num,
@@ -406,7 +431,7 @@ index 6afb46a..4dd25de 100644
  {
  	u64 start = 0;
  	u64 end = 0;
-@@ -3134,7 +3208,11 @@ static void __extent_readpages(struct extent_io_tree *tree,
+@@ -3134,7 +3221,11 @@ static void __extent_readpages(struct extent_io_tree *tree,
  						  index - first_index, start,
  						  end, get_extent, em_cached,
  						  bio, mirror_num, bio_flags,
@@ -419,7 +444,7 @@ index 6afb46a..4dd25de 100644
  			start = page_start;
  			end = start + PAGE_CACHE_SIZE - 1;
  			first_index = index;
-@@ -3145,7 +3223,11 @@ static void __extent_readpages(struct extent_io_tree *tree,
+@@ -3145,7 +3236,11 @@ static void __extent_readpages(struct extent_io_tree *tree,
  		__do_contiguous_readpages(tree, &pages[first_index],
  					  index - first_index, start,
  					  end, get_extent, em_cached, bio,
@@ -432,7 +457,7 @@ index 6afb46a..4dd25de 100644
  }
  
  static int __extent_read_full_page(struct extent_io_tree *tree,
-@@ -3171,7 +3253,7 @@ static int __extent_read_full_page(struct extent_io_tree *tree,
+@@ -3171,7 +3266,7 @@ static int __extent_read_full_page(struct extent_io_tree *tree,
  	}
  
  	ret = __do_readpage(tree, page, get_extent, NULL, bio, mirror_num,
@@ -441,7 +466,7 @@ index 6afb46a..4dd25de 100644
  	return ret;
  }
  
-@@ -3197,7 +3279,7 @@ int extent_read_full_page_nolock(struct extent_io_tree *tree, struct page *page,
+@@ -3197,7 +3292,7 @@ int extent_read_full_page_nolock(struct extent_io_tree *tree, struct page *page,
  	int ret;
  
  	ret = __do_readpage(tree, page, get_extent, NULL, &bio, mirror_num,
@@ -450,7 +475,7 @@ index 6afb46a..4dd25de 100644
  	if (bio)
  		ret = submit_one_bio(READ, bio, mirror_num, bio_flags);
  	return ret;
-@@ -3227,7 +3309,8 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+@@ -3227,7 +3322,8 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
  			      struct page *page, struct writeback_control *wbc,
  			      struct extent_page_data *epd,
  			      u64 delalloc_start,
@@ -460,7 +485,7 @@ index 6afb46a..4dd25de 100644
  {
  	struct extent_io_tree *tree = epd->tree;
  	u64 page_end = delalloc_start + PAGE_CACHE_SIZE - 1;
-@@ -3245,7 +3328,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+@@ -3245,7 +3341,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
  					       page,
  					       &delalloc_start,
  					       &delalloc_end,
@@ -471,7 +496,7 @@ index 6afb46a..4dd25de 100644
  		if (nr_delalloc == 0) {
  			delalloc_start = delalloc_end + 1;
  			continue;
-@@ -3254,7 +3339,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
+@@ -3254,7 +3352,9 @@ static noinline_for_stack int writepage_delalloc(struct inode *inode,
  					       delalloc_start,
  					       delalloc_end,
  					       &page_started,
@@ -482,7 +507,7 @@ index 6afb46a..4dd25de 100644
  		/* File system has been set read-only */
  		if (ret) {
  			SetPageError(page);
-@@ -3318,7 +3405,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+@@ -3318,7 +3418,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
  				 struct extent_page_data *epd,
  				 loff_t i_size,
  				 unsigned long nr_written,
@@ -492,7 +517,7 @@ index 6afb46a..4dd25de 100644
  {
  	struct extent_io_tree *tree = epd->tree;
  	u64 start = page_offset(page);
-@@ -3350,7 +3438,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+@@ -3350,7 +3451,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
  				redirty_page_for_writepage(wbc, page);
  
  			update_nr_written(page, wbc, nr_written);
@@ -502,7 +527,7 @@ index 6afb46a..4dd25de 100644
  			ret = 1;
  			goto done_unlocked;
  		}
-@@ -3451,7 +3540,7 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+@@ -3451,7 +3553,7 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
  						 sector, iosize, pg_offset,
  						 bdev, &epd->bio, max_nr,
  						 end_bio_extent_writepage,
@@ -511,7 +536,7 @@ index 6afb46a..4dd25de 100644
  			if (ret)
  				SetPageError(page);
  		}
-@@ -3476,7 +3565,8 @@ done_unlocked:
+@@ -3476,7 +3578,8 @@ done_unlocked:
   * and the end_io handler clears the writeback ranges
   */
  static int __extent_writepage(struct page *page, struct writeback_control *wbc,
@@ -521,7 +546,7 @@ index 6afb46a..4dd25de 100644
  {
  	struct inode *inode = page->mapping->host;
  	struct extent_page_data *epd = data;
-@@ -3485,7 +3575,6 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+@@ -3485,7 +3588,6 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
  	int ret;
  	int nr = 0;
  	size_t pg_offset = 0;
@@ -529,7 +554,7 @@ index 6afb46a..4dd25de 100644
  	unsigned long end_index = i_size >> PAGE_CACHE_SHIFT;
  	int write_flags;
  	unsigned long nr_written = 0;
-@@ -3501,36 +3590,36 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+@@ -3501,36 +3603,36 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
  
  	ClearPageError(page);
  
@@ -586,7 +611,7 @@ index 6afb46a..4dd25de 100644
  	if (ret == 1)
  		goto done_unlocked;
  
-@@ -3544,7 +3633,8 @@ done:
+@@ -3544,7 +3646,8 @@ done:
  		ret = ret < 0 ? ret : -EIO;
  		end_extent_writepage(page, ret, start, page_end);
  	}
@@ -596,7 +621,7 @@ index 6afb46a..4dd25de 100644
  	return ret;
  
  done_unlocked:
-@@ -3762,7 +3852,8 @@ static noinline_for_stack int write_one_eb(struct extent_buffer *eb,
+@@ -3762,7 +3865,8 @@ static noinline_for_stack int write_one_eb(struct extent_buffer *eb,
  		ret = submit_extent_page(rw, tree, p, offset >> 9,
  					 PAGE_CACHE_SIZE, 0, bdev, &epd->bio,
  					 -1, end_bio_extent_buffer_writepage,
@@ -606,7 +631,7 @@ index 6afb46a..4dd25de 100644
  		epd->bio_flags = bio_flags;
  		if (ret) {
  			set_btree_ioerr(p);
-@@ -4082,7 +4173,8 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
+@@ -4082,7 +4186,8 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
  		.bio_flags = 0,
  	};
  
@@ -616,7 +641,7 @@ index 6afb46a..4dd25de 100644
  
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -4116,7 +4208,8 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+@@ -4116,7 +4221,8 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
  	while (start <= end) {
  		page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
  		if (clear_page_dirty_for_io(page))
@@ -626,7 +651,7 @@ index 6afb46a..4dd25de 100644
  		else {
  			if (tree->ops && tree->ops->writepage_end_io_hook)
  				tree->ops->writepage_end_io_hook(page, start,
-@@ -4132,6 +4225,13 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+@@ -4132,6 +4238,13 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
  	return ret;
  }
  
@@ -640,7 +665,7 @@ index 6afb46a..4dd25de 100644
  int extent_writepages(struct extent_io_tree *tree,
  		      struct address_space *mapping,
  		      get_extent_t *get_extent,
-@@ -4148,7 +4248,7 @@ int extent_writepages(struct extent_io_tree *tree,
+@@ -4148,7 +4261,7 @@ int extent_writepages(struct extent_io_tree *tree,
  	};
  
  	ret = extent_write_cache_pages(tree, mapping, wbc,
@@ -649,7 +674,7 @@ index 6afb46a..4dd25de 100644
  				       flush_write_bio);
  	flush_epd_write_bio(&epd);
  	return ret;
-@@ -4182,12 +4282,12 @@ int extent_readpages(struct extent_io_tree *tree,
+@@ -4182,12 +4295,12 @@ int extent_readpages(struct extent_io_tree *tree,
  		if (nr < ARRAY_SIZE(pagepool))
  			continue;
  		__extent_readpages(tree, pagepool, nr, get_extent, &em_cached,
@@ -664,7 +689,7 @@ index 6afb46a..4dd25de 100644
  
  	if (em_cached)
  		free_extent_map(em_cached);
-@@ -5597,3 +5697,62 @@ int try_release_extent_buffer(struct page *page)
+@@ -5597,3 +5710,63 @@ int try_release_extent_buffer(struct page *page)
  
  	return release_extent_buffer(eb);
  }
@@ -685,9 +710,10 @@ index 6afb46a..4dd25de 100644
 +		free_extent_map(em_cached);
 +
 +	if (bio) {
++		lustre_start_bio(numreqs);
 +		ret = submit_one_bio(READ, bio, 0, bio_flags);
-+		if (ret == 0 && numreqs)
-+			atomic_inc(numreqs);
++		if (ret < 0)
++			lustre_end_bio(wait, numreqs);
 +	}
 +	return ret;
 +}
