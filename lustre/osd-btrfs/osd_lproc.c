@@ -44,7 +44,34 @@
 #include "osd_internal.h"
 
 #if CONFIG_PROC_FS
+static ssize_t
+lprocfs_osd_force_sync_seq_write(struct file *file, const char *buffer,
+					size_t count, loff_t *off)
+{
+	struct seq_file	  *m = file->private_data;
+	struct dt_device  *dt = m->private;
+	struct osd_device *osd = osd_dt_dev(dt);
+	struct lu_env	   env;
+	int		   rc;
+
+	LASSERT(osd != NULL);
+	if (unlikely(osd->od_mnt == NULL))
+		return -EINPROGRESS;
+
+	rc = lu_env_init(&env, LCT_LOCAL);
+	if (rc)
+		return rc;
+	rc = dt_sync(&env, dt);
+	lu_env_fini(&env);
+
+	return rc == 0 ? count : rc;
+}
+LPROC_SEQ_FOPS_WO_TYPE(lbtrfs, osd_force_sync);
+
 struct lprocfs_vars lprocfs_osd_obd_vars[] = {
+	{ .name	=	"force_sync",
+	  .fops	=	&lbtrfs_osd_force_sync_fops	},
+	{ NULL }
 };
 
 int osd_procfs_init(struct osd_device *osd, const char *name)
