@@ -5,3 +5,4 @@ rhel7.2/btrfs-osd-iop-common.patch
 rhel7.2/mv-xattr-macros-into-btrfs.patch
 rhel7.2/btrfs-statfs-ifree.patch
 rhel7.2/btrfs-use-dynamic-minor.patch
+rhel7.2/btrfs-fix-BUG_ON-when-delete-unused-bg.patch
