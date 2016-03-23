@@ -531,6 +531,8 @@ static int osd_trans_stop(const struct lu_env *env, struct dt_device *dt,
 {
 	struct osd_device 	*dev = osd_dt_dev(dt);
 	struct osd_thandle	*oh;
+	struct osd_thread_info *oti = osd_oti_get(env);
+	struct osd_iobuf       *iobuf = &oti->oti_iobuf;
 	int			 rc = 0;
 
 	ENTRY;
@@ -552,6 +554,8 @@ static int osd_trans_stop(const struct lu_env *env, struct dt_device *dt,
 	} else {
 		OBD_FREE_PTR(oh);
 	}
+	wait_event(iobuf->dr_wait,
+		       atomic_read(&iobuf->dr_numreqs) == 0);
 
 	RETURN(rc);
 }

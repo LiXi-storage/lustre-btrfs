@@ -466,6 +466,8 @@ static int osd_write_prep(const struct lu_env *env, struct dt_object *dt,
 #endif
 		RETURN(rc);
 	}
+	wait_event(iobuf->dr_wait,
+		   atomic_read(&iobuf->dr_numreqs) == 0);
 
         RETURN(rc);
 }
@@ -602,6 +604,7 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 		LASSERT(!PageDirty(lnb[i].lnb_page));
 
 		SetPageUptodate(lnb[i].lnb_page);
+		ClearPageChecked(lnb[i].lnb_page);
 
 		osd_iobuf_add_page_sort(iobuf, lnb[i].lnb_page);
 	}
@@ -620,7 +623,8 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 		 * as an argument to walkaround it.
 		 */
 		rc = lbtrfs_write_commit(inode, isize, iobuf->dr_pages,
-					 iobuf->dr_npages);
+					 iobuf->dr_npages, &iobuf->dr_wait,
+					 &iobuf->dr_numreqs);
 	}
 
 	if (likely(rc == 0)) {

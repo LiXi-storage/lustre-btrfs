@@ -1,0 +1,399 @@
+From ffb73b923c61da28f5f9790ba204a3fa508a4899 Mon Sep 17 00:00:00 2001
+From: Gu Zheng <gzheng@ddn.com>
+Date: Mon, 28 Mar 2016 08:02:05 -0400
+Subject: [PATCH] btrfs: optimze a little to be friendly to osd-btrfs
+
+---
+ fs/btrfs/btrfs_inode.h  |  3 ++-
+ fs/btrfs/compression.c  |  2 +-
+ fs/btrfs/ctree.h        |  1 +
+ fs/btrfs/extent_io.c    | 71 +++++++++++++++++++++++++++++++------------------
+ fs/btrfs/extent_io.h    |  6 +++--
+ fs/btrfs/inode.c        | 18 +++++++++----
+ fs/btrfs/ordered-data.h |  4 +++
+ 7 files changed, 70 insertions(+), 35 deletions(-)
+
+diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
+index f6b03cf..ab64ed5 100644
+--- a/fs/btrfs/btrfs_inode.h
++++ b/fs/btrfs/btrfs_inode.h
+@@ -372,7 +372,8 @@ int btrfs_punch(struct inode *inode, struct btrfs_trans_handle *trans,
+ int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages,
+ 		    wait_queue_head_t *wait, atomic_t *numreqs);
+ int btrfs_write_commit(struct inode *inode, loff_t i_size,
+-		       struct page **pages, int nr_pages);
++		       struct page **pages, int nr_pages,
++		       wait_queue_head_t *wait, atomic_t *numreqs);
+ int __btrfs_setxattr(struct btrfs_trans_handle *trans,
+ 		     struct inode *inode, const char *name,
+ 		     const void *value, size_t size, int flags);
+diff --git a/fs/btrfs/compression.c b/fs/btrfs/compression.c
+index d67b73a..3f4fc0e 100644
+--- a/fs/btrfs/compression.c
++++ b/fs/btrfs/compression.c
+@@ -294,7 +294,7 @@ static void end_compressed_bio_write(struct bio *bio, int err)
+ 					 cb->start,
+ 					 cb->start + cb->len - 1,
+ 					 NULL,
+-					 err ? 0 : 1);
++					 err ? 0 : 1, NULL, NULL);
+ 	cb->compressed_pages[0]->mapping = NULL;
+ 
+ 	end_compressed_writeback(inode, cb);
+diff --git a/fs/btrfs/ctree.h b/fs/btrfs/ctree.h
+index 03290d2..7fae6c9 100644
+--- a/fs/btrfs/ctree.h
++++ b/fs/btrfs/ctree.h
+@@ -4217,6 +4217,7 @@ int btrfs_write_record(struct inode *inode, void *buf,
+ int btrfs_read_record(struct inode *inode, void *buf,
+ 		      int size, loff_t *offs);
+ int btrfs_record_test(struct vfsmount *mnt);
++void lustre_end_bio(wait_queue_head_t *wait, atomic_t *numreqs);
+ 
+ /* Sanity test specific functions */
+ #ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
+diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
+index 969b6dc..8ec6680 100644
+--- a/fs/btrfs/extent_io.c
++++ b/fs/btrfs/extent_io.c
+@@ -2480,7 +2480,8 @@ static int bio_readpage_error(struct bio *failed_bio, u64 phy_offset,
+ 
+ /* lots and lots of room for performance fixes in the end_bio funcs */
+ 
+-int end_extent_writepage(struct page *page, int err, u64 start, u64 end)
++int end_extent_writepage(struct page *page, int err, u64 start, u64 end,
++			 wait_queue_head_t *wait, atomic_t *numreqs)
+ {
+ 	int uptodate = (err == 0);
+ 	struct extent_io_tree *tree;
+@@ -2490,7 +2491,7 @@ int end_extent_writepage(struct page *page, int err, u64 start, u64 end)
+ 
+ 	if (tree->ops && tree->ops->writepage_end_io_hook) {
+ 		ret = tree->ops->writepage_end_io_hook(page, start,
+-					       end, NULL, uptodate);
++					       end, NULL, uptodate, wait, numreqs);
+ 		if (ret)
+ 			uptodate = 0;
+ 	}
+@@ -2516,6 +2517,7 @@ int end_extent_writepage(struct page *page, int err, u64 start, u64 end)
+ static void end_bio_extent_writepage(struct bio *bio, int err)
+ {
+ 	struct bio_vec *bvec = bio->bi_io_vec + bio->bi_vcnt - 1;
++	struct btrfs_io_bio *io_bio = btrfs_io_bio(bio);
+ 	u64 start;
+ 	u64 end;
+ 
+@@ -2545,8 +2547,15 @@ static void end_bio_extent_writepage(struct bio *bio, int err)
+ 		if (--bvec >= bio->bi_io_vec)
+ 			prefetchw(&bvec->bv_page->flags);
+ 
+-		if (end_extent_writepage(page, err, start, end))
+-			continue;
++		if (bvec >= bio->bi_io_vec) {
++			if (end_extent_writepage(page, err, start, end, NULL, NULL))
++				continue;
++		} else {
++			/* only decrease once for one bio */
++			if (end_extent_writepage(page, err, start, end, io_bio->wait,
++					 io_bio->numreqs))
++				continue;
++		}
+ 
+ 		end_page_writeback(page);
+ 	} while (bvec >= bio->bi_io_vec);
+@@ -2572,7 +2581,7 @@ static void lustre_start_bio(atomic_t *numreqs)
+ 		atomic_inc(numreqs);
+ }
+ 
+-static void lustre_end_bio(wait_queue_head_t *wait, atomic_t *numreqs)
++void lustre_end_bio(wait_queue_head_t *wait, atomic_t *numreqs)
+ {
+ 	if (numreqs && atomic_dec_and_test(numreqs))
+ 		wake_up(wait);
+@@ -3419,7 +3428,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+ 				 loff_t i_size,
+ 				 unsigned long nr_written,
+ 				 int write_flags, int *nr_ret,
+-				 int keep_page)
++				 int keep_page,
++		       		 wait_queue_head_t *wait, atomic_t *numreqs)
+ {
+ 	struct extent_io_tree *tree = epd->tree;
+ 	u64 start = page_offset(page);
+@@ -3469,7 +3479,7 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+ 	if (i_size <= start) {
+ 		if (tree->ops && tree->ops->writepage_end_io_hook)
+ 			tree->ops->writepage_end_io_hook(page, start,
+-							 page_end, NULL, 1);
++							 page_end, NULL, 1, NULL, NULL);
+ 		goto done;
+ 	}
+ 
+@@ -3480,7 +3490,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+ 		if (cur >= i_size) {
+ 			if (tree->ops && tree->ops->writepage_end_io_hook)
+ 				tree->ops->writepage_end_io_hook(page, cur,
+-							 page_end, NULL, 1);
++							 page_end, NULL, 1,
++							 NULL, NULL);
+ 			break;
+ 		}
+ 		em = epd->get_extent(inode, page, pg_offset, cur,
+@@ -3518,7 +3529,7 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+ 			    tree->ops->writepage_end_io_hook)
+ 				tree->ops->writepage_end_io_hook(page, cur,
+ 							 cur + iosize - 1,
+-							 NULL, 1);
++							 NULL, 1, NULL, NULL);
+ 			else if (compressed) {
+ 				/* we don't want to end_page_writeback on
+ 				 * a compressed extent.  this happens
+@@ -3554,7 +3565,7 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
+ 						 sector, iosize, pg_offset,
+ 						 bdev, &epd->bio, max_nr,
+ 						 end_bio_extent_writepage,
+-						 0, 0, 0, NULL, 0, NULL, NULL);
++						 0, 0, 0, NULL, 0, wait, numreqs);
+ 			if (ret)
+ 				SetPageError(page);
+ 		}
+@@ -3580,7 +3591,8 @@ done_unlocked:
+  */
+ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+ 			      void *data, int keep_page, loff_t i_size,
+-			      struct page **locked_pages, int locked_page_num)
++			      struct page **locked_pages, int locked_page_num,
++		       	      wait_queue_head_t *wait, atomic_t *numreqs)
+ {
+ 	struct inode *inode = page->mapping->host;
+ 	struct extent_page_data *epd = data;
+@@ -3633,7 +3645,8 @@ static int __extent_writepage(struct page *page, struct writeback_control *wbc,
+ 		goto done;
+ 
+ 	ret = __extent_writepage_io(inode, page, wbc, epd,
+-				    i_size, nr_written, write_flags, &nr, keep_page);
++				    i_size, nr_written, write_flags, &nr, keep_page,
++				    wait, numreqs);
+ 	if (ret == 1)
+ 		goto done_unlocked;
+ 
+@@ -3645,7 +3658,7 @@ done:
+ 	}
+ 	if (PageError(page)) {
+ 		ret = ret < 0 ? ret : -EIO;
+-		end_extent_writepage(page, ret, start, page_end);
++		end_extent_writepage(page, ret, start, page_end, wait, numreqs);
+ 	}
+ 	if (!keep_page)
+ 		unlock_page(page);
+@@ -4152,7 +4165,8 @@ retry:
+ 	return err;
+ }
+ 
+-static void flush_epd_write_bio(struct extent_page_data *epd)
++static void flush_epd_write_bio(struct extent_page_data *epd,
++		       		wait_queue_head_t *wait, atomic_t *numreqs)
+ {
+ 	if (epd->bio) {
+ 		int rw = WRITE;
+@@ -4161,8 +4175,10 @@ static void flush_epd_write_bio(struct extent_page_data *epd)
+ 		if (epd->sync_io)
+ 			rw = WRITE_SYNC;
+ 
++		lustre_start_bio(numreqs);
+ 		ret = submit_one_bio(rw, epd->bio, 0, epd->bio_flags);
+-		BUG_ON(ret < 0); /* -ENOMEM */
++		if (ret < 0)
++			lustre_end_bio(wait, numreqs);
+ 		epd->bio = NULL;
+ 	}
+ }
+@@ -4170,7 +4186,7 @@ static void flush_epd_write_bio(struct extent_page_data *epd)
+ static noinline void flush_write_bio(void *data)
+ {
+ 	struct extent_page_data *epd = data;
+-	flush_epd_write_bio(epd);
++	flush_epd_write_bio(epd, NULL, NULL);
+ }
+ 
+ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
+@@ -4188,9 +4204,10 @@ int extent_write_full_page(struct extent_io_tree *tree, struct page *page,
+ 	};
+ 
+ 	ret = __extent_writepage(page, wbc, &epd, 0,
+-				 i_size_read(page->mapping->host), NULL, 0);
++				 i_size_read(page->mapping->host), NULL,
++				 0, NULL, NULL);
+ 
+-	flush_epd_write_bio(&epd);
++	flush_epd_write_bio(&epd, NULL, NULL);
+ 	return ret;
+ }
+ 
+@@ -4223,19 +4240,20 @@ int extent_write_locked_range(struct extent_io_tree *tree, struct inode *inode,
+ 		page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
+ 		if (clear_page_dirty_for_io(page))
+ 			ret = __extent_writepage(page, &wbc_writepages, &epd, 0,
+-						 i_size_read(inode), NULL, 0);
++						 i_size_read(inode), NULL,
++						 0, NULL, NULL);
+ 		else {
+ 			if (tree->ops && tree->ops->writepage_end_io_hook)
+ 				tree->ops->writepage_end_io_hook(page, start,
+ 						 start + PAGE_CACHE_SIZE - 1,
+-						 NULL, 1);
++						 NULL, 1, NULL, NULL);
+ 			unlock_page(page);
+ 		}
+ 		page_cache_release(page);
+ 		start += PAGE_CACHE_SIZE;
+ 	}
+ 
+-	flush_epd_write_bio(&epd);
++	flush_epd_write_bio(&epd, NULL, NULL);
+ 	return ret;
+ }
+ 
+@@ -4243,7 +4261,7 @@ static int extent_writepage(struct page *page, struct writeback_control *wbc,
+ 			    void *data)
+ {
+ 	return __extent_writepage(page, wbc, data, 0,
+-				  i_size_read(page->mapping->host), NULL, 0);
++				  i_size_read(page->mapping->host), NULL, 0, NULL, NULL);
+ }
+ 
+ int extent_writepages(struct extent_io_tree *tree,
+@@ -4264,7 +4282,7 @@ int extent_writepages(struct extent_io_tree *tree,
+ 	ret = extent_write_cache_pages(tree, mapping, wbc,
+ 				       extent_writepage, &epd,
+ 				       flush_write_bio);
+-	flush_epd_write_bio(&epd);
++	flush_epd_write_bio(&epd, NULL, NULL);
+ 	return ret;
+ }
+ 
+@@ -5738,7 +5756,8 @@ int btrfs_read_prep(struct inode *inode, struct page **pages, int nr_pages,
+ EXPORT_SYMBOL(btrfs_read_prep);
+ 
+ int btrfs_write_commit(struct inode *inode, loff_t i_size,
+-		       struct page **pages, int nr_pages)
++		       struct page **pages, int nr_pages,
++		       wait_queue_head_t *wait, atomic_t *numreqs)
+ {
+ 	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
+ 	struct writeback_control wbc = {
+@@ -5762,12 +5781,12 @@ int btrfs_write_commit(struct inode *inode, loff_t i_size,
+ 		if(!clear_page_dirty_for_io(pages[i]))
+ 		 	continue;
+ 		ret = __extent_writepage(pages[i], &wbc, &epd, 1, i_size,
+-					 pages, nr_pages);
++					 pages, nr_pages, wait, numreqs);
+ 		if (ret)
+ 			break;
+ 	}
+ 
+-	flush_epd_write_bio(&epd);
++	flush_epd_write_bio(&epd, wait, numreqs);
+ 	return ret;
+ }
+ EXPORT_SYMBOL(btrfs_write_commit);
+diff --git a/fs/btrfs/extent_io.h b/fs/btrfs/extent_io.h
+index f8d916c..0c17d70 100644
+--- a/fs/btrfs/extent_io.h
++++ b/fs/btrfs/extent_io.h
+@@ -81,7 +81,8 @@ struct extent_io_ops {
+ 				    struct page *page, u64 start, u64 end,
+ 				    int mirror);
+ 	int (*writepage_end_io_hook)(struct page *page, u64 start, u64 end,
+-				      struct extent_state *state, int uptodate);
++				      struct extent_state *state, int uptodate,
++		       		wait_queue_head_t *wait, atomic_t *numreqs);
+ 	void (*set_bit_hook)(struct inode *inode, struct extent_state *state,
+ 			     unsigned long *bits);
+ 	void (*clear_bit_hook)(struct inode *inode, struct extent_state *state,
+@@ -341,7 +342,8 @@ int repair_io_failure(struct inode *inode, u64 start, u64 length, u64 logical,
+ 		      int mirror_num);
+ int clean_io_failure(struct inode *inode, u64 start, struct page *page,
+ 		     unsigned int pg_offset);
+-int end_extent_writepage(struct page *page, int err, u64 start, u64 end);
++int end_extent_writepage(struct page *page, int err, u64 start, u64 end,
++			 wait_queue_head_t *wait, atomic_t *numreqs);
+ int repair_eb_io_failure(struct btrfs_root *root, struct extent_buffer *eb,
+ 			 int mirror_num);
+ 
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index 701a4cd..86588fd 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -827,7 +827,7 @@ retry:
+ 
+ 			p->mapping = inode->i_mapping;
+ 			tree->ops->writepage_end_io_hook(p, start, end,
+-							 NULL, 0);
++							 NULL, 0, NULL, NULL);
+ 			p->mapping = NULL;
+ 			extent_clear_unlock_delalloc(inode, start, end, NULL, 0,
+ 						     PAGE_END_WRITEBACK |
+@@ -1932,7 +1932,8 @@ again:
+ 	ret = btrfs_delalloc_reserve_space(inode, PAGE_CACHE_SIZE);
+ 	if (ret) {
+ 		mapping_set_error(page->mapping, ret);
+-		end_extent_writepage(page, ret, page_start, page_end);
++		end_extent_writepage(page, ret, page_start, page_end,
++				     NULL, NULL);
+ 		ClearPageChecked(page);
+ 		goto out;
+ 	 }
+@@ -2888,6 +2889,7 @@ out:
+ 	}
+ 
+ 
++	lustre_end_bio(ordered_extent->lustre_wait, ordered_extent->lustre_numreqs);
+ 	/*
+ 	 * This needs to be done to make sure anybody waiting knows we are done
+ 	 * updating everything for this ordered extent.
+@@ -2920,7 +2922,8 @@ static void finish_ordered_fn(struct btrfs_work *work)
+ }
+ 
+ static int btrfs_writepage_end_io_hook(struct page *page, u64 start, u64 end,
+-				struct extent_state *state, int uptodate)
++				struct extent_state *state, int uptodate,
++		       		wait_queue_head_t *wait, atomic_t *numreqs)
+ {
+ 	struct inode *inode = page->mapping->host;
+ 	struct btrfs_root *root = BTRFS_I(inode)->root;
+@@ -2931,9 +2934,14 @@ static int btrfs_writepage_end_io_hook(struct page *page, u64 start, u64 end,
+ 	trace_btrfs_writepage_end_io_hook(page, start, end, uptodate);
+ 
+ 	ClearPagePrivate2(page);
+-	if (!btrfs_dec_test_ordered_pending(inode, &ordered_extent, start,
+-					    end - start + 1, uptodate))
++	if (!btrfs_dec_test_ordered_pending(inode, &ordered_extent, start, 
++					    end - start + 1, uptodate)) {
++		lustre_end_bio(wait, numreqs);
+ 		return 0;
++	}
++
++	ordered_extent->lustre_wait = wait;
++	ordered_extent->lustre_numreqs = numreqs;
+ 
+ 	if (btrfs_is_free_space_inode(inode)) {
+ 		wq = root->fs_info->endio_freespace_worker;
+diff --git a/fs/btrfs/ordered-data.h b/fs/btrfs/ordered-data.h
+index e96cd4c..409d4c5 100644
+--- a/fs/btrfs/ordered-data.h
++++ b/fs/btrfs/ordered-data.h
+@@ -140,6 +140,10 @@ struct btrfs_ordered_extent {
+ 	struct completion completion;
+ 	struct btrfs_work flush_work;
+ 	struct list_head work_list;
++
++	/* only used by Lustre */
++	wait_queue_head_t *lustre_wait;
++	atomic_t *lustre_numreqs;
+ };
+ 
+ /*
+-- 
+1.8.3.1
+
